@@ -472,8 +472,58 @@ export default function SettingsPage() {
                 </CardContent>
               </Card>
 
+              <Card>
+                <CardHeader>
+                  <CardTitle>SRG-SSR API (SRF/RTS/RSI)</CardTitle>
+                  <CardDescription>
+                    Schweizer Sender API für SRF, RTS, RSI Inhalte.{" "}
+                    <a
+                      href="https://developer.srgssr.ch/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary hover:underline"
+                    >
+                      API-Zugang beantragen
+                    </a>
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <label className="text-sm font-medium">Consumer Key</label>
+                    <Input
+                      value={getFieldValue("api.srgssr.consumerKey")}
+                      onChange={(e) => setFieldValue("api.srgssr.consumerKey", e.target.value)}
+                      placeholder="SRG-SSR Consumer Key"
+                      className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">Consumer Secret</label>
+                    <Input
+                      type="password"
+                      value={getFieldValue("api.srgssr.consumerSecret")}
+                      onChange={(e) => setFieldValue("api.srgssr.consumerSecret", e.target.value)}
+                      placeholder="SRG-SSR Consumer Secret"
+                      className="mt-1"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Hinweis: Inhalte von SRF sind oft geo-blockiert. Konfiguriere einen Schweizer
+                    Proxy in den Streaming-Einstellungen für Zugriff aus dem Ausland.
+                  </p>
+                </CardContent>
+              </Card>
+
               <Button
-                onClick={() => handleSave(["api.tvdb.key", "api.tvdb.pin", "api.tmdb.key"])}
+                onClick={() =>
+                  handleSave([
+                    "api.tvdb.key",
+                    "api.tvdb.pin",
+                    "api.tmdb.key",
+                    "api.srgssr.consumerKey",
+                    "api.srgssr.consumerSecret",
+                  ])
+                }
                 disabled={isSaving}
               >
                 {isSaving ? (
