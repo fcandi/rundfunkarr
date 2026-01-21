@@ -127,7 +127,7 @@ export abstract class BaseProvider implements ContentProvider {
       .replace(/Ö/g, "Oe")
       .replace(/Ü/g, "Ue")
       .replace(/&/g, "and")
-      .replace(/[/:;,""''@#?$%^*+=!|<>,()]/g, "")
+      .replace(/[/:;,"'@#?$%^*+=!|<>()]/g, "")
       .replace(/\s+/g, ".")
       .replace(/\.+/g, ".");
   }

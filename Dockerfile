@@ -38,7 +38,8 @@ RUN mkdir -p /app/standalone-out && \
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-# Install runtime dependencies for FFmpeg, yt-dlp, user management, and DB init
+# Install runtime dependencies for FFmpeg, user management, and DB init
+# Note: yt-dlp standalone binary includes bundled Python, no separate install needed
 RUN apk add --no-cache \
     tar \
     xz \
@@ -48,7 +49,6 @@ RUN apk add --no-cache \
     shadow \
     sqlite \
     ffmpeg \
-    python3 \
     && rm -rf /var/cache/apk/*
 
 # Install yt-dlp binary

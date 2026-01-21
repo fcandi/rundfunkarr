@@ -18,6 +18,8 @@ import type {
 const ORF_SEARCH_URL = "https://on.orf.at/suche?q=";
 
 // Minimum duration for content (5 minutes by default)
+// Note: yt-dlp returns duration in SECONDS, so we use seconds here
+// (unlike SRF which uses milliseconds because SRG-SSR API returns ms)
 const DEFAULT_MIN_DURATION = 5 * 60; // seconds
 
 // Skip keywords (trailers, clips, etc.)

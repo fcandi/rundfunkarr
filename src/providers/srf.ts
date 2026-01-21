@@ -16,6 +16,8 @@ import type {
 } from "@/types/provider";
 
 // Minimum duration for content (5 minutes by default)
+// Note: SRG-SSR API returns duration in MILLISECONDS, so we use ms here
+// Setting matching.minDuration is in seconds, converted to ms in initialize()
 const DEFAULT_MIN_DURATION = 5 * 60 * 1000; // milliseconds
 
 // Skip keywords (trailers, clips, etc.)

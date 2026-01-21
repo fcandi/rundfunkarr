@@ -185,11 +185,21 @@ export async function getVideoInfo(url: string): Promise<YtdlpVideoInfo | null> 
   args.push(url);
 
   return new Promise((resolve) => {
+    let resolved = false;
     console.log(`[yt-dlp] Getting info for: ${url}`);
     const proc = spawn(ytdlpPath, args);
 
     let stdout = "";
     let stderr = "";
+
+    // Timeout after 30 seconds
+    const timeout = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      proc.kill();
+      console.error("[yt-dlp] Video info extraction timeout");
+      resolve(null);
+    }, 30000);
 
     proc.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -200,6 +210,10 @@ export async function getVideoInfo(url: string): Promise<YtdlpVideoInfo | null> 
     });
 
     proc.on("close", (code) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+
       if (code === 0 && stdout) {
         try {
           const info = JSON.parse(stdout);
@@ -232,6 +246,9 @@ export async function getVideoInfo(url: string): Promise<YtdlpVideoInfo | null> 
     });
 
     proc.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
       console.error("[yt-dlp] Process error:", err);
       resolve(null);
     });
@@ -450,16 +467,28 @@ export async function testProxy(
   const ytdlpPath = await getConfiguredYtdlpPath();
 
   return new Promise((resolve) => {
+    let resolved = false;
     // Use yt-dlp to test connectivity through proxy
     const proc = spawn(ytdlpPath, ["--proxy", proxyUrl, "--simulate", "--no-warnings", testUrl]);
 
     let stderr = "";
+
+    // Timeout after 30 seconds
+    const timeout = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      proc.kill();
+      resolve({ success: false, error: "Connection timeout" });
+    }, 30000);
 
     proc.stderr.on("data", (data) => {
       stderr += data.toString();
     });
 
     proc.on("close", (code) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
       if (code === 0) {
         resolve({ success: true });
       } else {
@@ -468,14 +497,11 @@ export async function testProxy(
     });
 
     proc.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
       resolve({ success: false, error: err.message });
     });
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      proc.kill();
-      resolve({ success: false, error: "Connection timeout" });
-    }, 30000);
   });
 }
 
@@ -511,11 +537,21 @@ export async function extractPlaylistEntries(
   args.push(url);
 
   return new Promise((resolve) => {
+    let resolved = false;
     console.log(`[yt-dlp] Extracting playlist entries from: ${url}`);
     const proc = spawn(ytdlpPath, args);
 
     let stdout = "";
     let stderr = "";
+
+    // Timeout after 60 seconds for search operations
+    const timeout = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      proc.kill();
+      console.error("[yt-dlp] Playlist extraction timeout");
+      resolve([]);
+    }, 60000);
 
     proc.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -526,6 +562,10 @@ export async function extractPlaylistEntries(
     });
 
     proc.on("close", (code) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+
       if (code === 0 && stdout) {
         try {
           // Each line is a separate JSON object
@@ -571,16 +611,12 @@ export async function extractPlaylistEntries(
     });
 
     proc.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
       console.error("[yt-dlp] Process error:", err);
       resolve([]);
     });
-
-    // Timeout after 60 seconds for search operations
-    setTimeout(() => {
-      proc.kill();
-      console.error("[yt-dlp] Playlist extraction timeout");
-      resolve([]);
-    }, 60000);
   });
 }
 
@@ -607,11 +643,21 @@ export async function getDetailedVideoInfo(url: string): Promise<YtdlpVideoInfo 
   args.push(url);
 
   return new Promise((resolve) => {
+    let resolved = false;
     console.log(`[yt-dlp] Getting detailed info for: ${url}`);
     const proc = spawn(ytdlpPath, args);
 
     let stdout = "";
     let stderr = "";
+
+    // Timeout after 30 seconds
+    const timeout = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      proc.kill();
+      console.error("[yt-dlp] Video info extraction timeout");
+      resolve(null);
+    }, 30000);
 
     proc.stdout.on("data", (data) => {
       stdout += data.toString();
@@ -622,6 +668,10 @@ export async function getDetailedVideoInfo(url: string): Promise<YtdlpVideoInfo 
     });
 
     proc.on("close", (code) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+
       if (code === 0 && stdout) {
         try {
           const info = JSON.parse(stdout);
@@ -662,15 +712,11 @@ export async function getDetailedVideoInfo(url: string): Promise<YtdlpVideoInfo 
     });
 
     proc.on("error", (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
       console.error("[yt-dlp] Process error:", err);
       resolve(null);
     });
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      proc.kill();
-      console.error("[yt-dlp] Video info extraction timeout");
-      resolve(null);
-    }, 30000);
   });
 }

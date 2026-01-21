@@ -75,8 +75,15 @@ async function getAccessToken(): Promise<string | null> {
     }
 
     const data = await response.json();
+
+    // Validate token response
+    if (!data || typeof data.access_token !== "string") {
+      console.error("[SRG-SSR] Token response missing access_token");
+      return null;
+    }
+
     const token = data.access_token;
-    const expiresIn = data.expires_in || 3600;
+    const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
 
     // Cache token
     cachedToken = {
