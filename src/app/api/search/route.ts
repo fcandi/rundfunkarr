@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCategoriesForTopics, CategoryType } from "@/services/category";
+import { getSetting } from "@/lib/settings";
 
 const MEDIATHEK_API_URL = "https://mediathekviewweb.de/api/query";
+
+async function isHlsEnabled(): Promise<boolean> {
+  const setting = await getSetting("download.enableHLS");
+  return setting === "true";
+}
 
 export interface SearchResult {
   id: string;
@@ -57,14 +63,15 @@ export async function GET(request: NextRequest) {
     const data = await response.json();
     const items = data.result?.results || [];
 
-    // Filter out m3u8 streams and transform results
+    // Filter out m3u8 streams (unless HLS enabled) and transform results
     // For movies: only items >= 60 minutes (3600 seconds)
     const minDuration = type === "movie" ? 3600 : 0;
+    const hlsEnabled = await isHlsEnabled();
 
     const filteredItems = items
       .filter(
         (item: { url_video: string; duration: number }) =>
-          !item.url_video.endsWith(".m3u8") && item.duration >= minDuration
+          (hlsEnabled || !item.url_video.endsWith(".m3u8")) && item.duration >= minDuration
       )
       .slice(0, limit);
 
