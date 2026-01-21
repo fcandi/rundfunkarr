@@ -108,6 +108,29 @@ export interface YtdlpVideoInfo {
   ext: string; // file extension
   filesize?: number;
   formats?: YtdlpFormat[];
+  webpage_url?: string;
+  thumbnail?: string;
+  upload_date?: string; // YYYYMMDD format
+  channel?: string;
+  uploader?: string;
+  series?: string;
+  season_number?: number;
+  episode_number?: number;
+}
+
+export interface YtdlpPlaylistEntry {
+  id: string;
+  title: string;
+  url: string;
+  duration?: number;
+  description?: string;
+  thumbnail?: string;
+  upload_date?: string;
+  channel?: string;
+  uploader?: string;
+  series?: string;
+  season_number?: number;
+  episode_number?: number;
 }
 
 export interface YtdlpFormat {
@@ -452,6 +475,202 @@ export async function testProxy(
     setTimeout(() => {
       proc.kill();
       resolve({ success: false, error: "Connection timeout" });
+    }, 30000);
+  });
+}
+
+/**
+ * Extract playlist entries from a URL using yt-dlp --flat-playlist
+ * Used for search functionality where we need to get a list of videos without downloading
+ */
+export async function extractPlaylistEntries(
+  url: string,
+  maxEntries: number = 50
+): Promise<YtdlpPlaylistEntry[]> {
+  const ytdlpExists = await ensureYtdlpExists();
+  if (!ytdlpExists) {
+    console.error("[yt-dlp] yt-dlp not available");
+    return [];
+  }
+
+  const ytdlpPath = await getConfiguredYtdlpPath();
+  const proxyUrl = await getProxyUrl();
+
+  const args = [
+    "--flat-playlist",
+    "--dump-json",
+    "--no-warnings",
+    "--playlist-end",
+    maxEntries.toString(),
+  ];
+
+  if (proxyUrl) {
+    args.push("--proxy", proxyUrl);
+  }
+
+  args.push(url);
+
+  return new Promise((resolve) => {
+    console.log(`[yt-dlp] Extracting playlist entries from: ${url}`);
+    const proc = spawn(ytdlpPath, args);
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    proc.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0 && stdout) {
+        try {
+          // Each line is a separate JSON object
+          const entries: YtdlpPlaylistEntry[] = [];
+          const lines = stdout.trim().split("\n");
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const entry = JSON.parse(line);
+              entries.push({
+                id: entry.id || "",
+                title: entry.title || "",
+                url: entry.url || entry.webpage_url || "",
+                duration: entry.duration || 0,
+                description: entry.description || "",
+                thumbnail: entry.thumbnail || entry.thumbnails?.[0]?.url || "",
+                upload_date: entry.upload_date || "",
+                channel: entry.channel || entry.uploader || "",
+                uploader: entry.uploader || "",
+                series: entry.series || "",
+                season_number: entry.season_number,
+                episode_number: entry.episode_number,
+              });
+            } catch {
+              // Skip invalid JSON lines
+              continue;
+            }
+          }
+
+          console.log(`[yt-dlp] Extracted ${entries.length} playlist entries`);
+          resolve(entries);
+        } catch (parseError) {
+          console.error("[yt-dlp] Failed to parse playlist output:", parseError);
+          resolve([]);
+        }
+      } else {
+        if (stderr) {
+          console.error(`[yt-dlp] Playlist extraction failed: ${stderr}`);
+        }
+        resolve([]);
+      }
+    });
+
+    proc.on("error", (err) => {
+      console.error("[yt-dlp] Process error:", err);
+      resolve([]);
+    });
+
+    // Timeout after 60 seconds for search operations
+    setTimeout(() => {
+      proc.kill();
+      console.error("[yt-dlp] Playlist extraction timeout");
+      resolve([]);
+    }, 60000);
+  });
+}
+
+/**
+ * Get detailed video info for a single URL
+ * Returns more detailed metadata than extractPlaylistEntries
+ */
+export async function getDetailedVideoInfo(url: string): Promise<YtdlpVideoInfo | null> {
+  const ytdlpExists = await ensureYtdlpExists();
+  if (!ytdlpExists) {
+    console.error("[yt-dlp] yt-dlp not available");
+    return null;
+  }
+
+  const ytdlpPath = await getConfiguredYtdlpPath();
+  const proxyUrl = await getProxyUrl();
+
+  const args = ["--dump-json", "--no-warnings", "--no-playlist"];
+
+  if (proxyUrl) {
+    args.push("--proxy", proxyUrl);
+  }
+
+  args.push(url);
+
+  return new Promise((resolve) => {
+    console.log(`[yt-dlp] Getting detailed info for: ${url}`);
+    const proc = spawn(ytdlpPath, args);
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    proc.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0 && stdout) {
+        try {
+          const info = JSON.parse(stdout);
+          resolve({
+            id: info.id || "",
+            title: info.title || "",
+            description: info.description || "",
+            duration: info.duration || 0,
+            url: info.url || info.webpage_url || url,
+            ext: info.ext || "mp4",
+            filesize: info.filesize || info.filesize_approx,
+            webpage_url: info.webpage_url || "",
+            thumbnail: info.thumbnail || info.thumbnails?.[0]?.url || "",
+            upload_date: info.upload_date || "",
+            channel: info.channel || info.uploader || "",
+            uploader: info.uploader || "",
+            series: info.series || "",
+            season_number: info.season_number,
+            episode_number: info.episode_number,
+            formats: info.formats?.map((f: Record<string, unknown>) => ({
+              format_id: f.format_id,
+              ext: f.ext,
+              resolution: f.resolution,
+              height: f.height,
+              width: f.width,
+              filesize: f.filesize || f.filesize_approx,
+              url: f.url,
+            })),
+          });
+        } catch (parseError) {
+          console.error("[yt-dlp] Failed to parse JSON output:", parseError);
+          resolve(null);
+        }
+      } else {
+        console.error(`[yt-dlp] Failed with code ${code}: ${stderr}`);
+        resolve(null);
+      }
+    });
+
+    proc.on("error", (err) => {
+      console.error("[yt-dlp] Process error:", err);
+      resolve(null);
+    });
+
+    // Timeout after 30 seconds
+    setTimeout(() => {
+      proc.kill();
+      console.error("[yt-dlp] Video info extraction timeout");
+      resolve(null);
     }, 30000);
   });
 }
