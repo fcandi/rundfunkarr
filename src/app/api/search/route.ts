@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCategoriesForTopics, CategoryType } from "@/services/category";
 import { getSetting } from "@/lib/settings";
+import { providerRegistry, initializeProviders } from "@/providers";
+import type { ProviderContentItem } from "@/types/provider";
 
 const MEDIATHEK_API_URL = "https://mediathekviewweb.de/api/query";
 
@@ -23,6 +25,32 @@ export interface SearchResult {
   url_video_low: string;
   url_website: string;
   category?: CategoryType;
+  providerId?: string;
+}
+
+/**
+ * Convert a ProviderContentItem to SearchResult format
+ */
+function providerItemToSearchResult(
+  item: ProviderContentItem,
+  category?: CategoryType
+): SearchResult {
+  return {
+    id: item.id,
+    channel: item.channel,
+    topic: item.topic,
+    title: item.title,
+    description: item.description,
+    timestamp: item.timestamp,
+    duration: item.duration,
+    size: item.size,
+    url_video: item.videoUrls.standard,
+    url_video_hd: item.videoUrls.high || item.videoUrls.standard,
+    url_video_low: item.videoUrls.low || "",
+    url_website: item.websiteUrl,
+    category,
+    providerId: item.providerId,
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -30,11 +58,89 @@ export async function GET(request: NextRequest) {
   const q = searchParams.get("q");
   const limit = parseInt(searchParams.get("limit") || "50", 10);
   const type = searchParams.get("type"); // "movie" for movies only
+  const useProviders = searchParams.get("providers") === "true"; // Use provider system
+  const providerId = searchParams.get("provider"); // Specific provider to search
 
   if (!q || q.trim().length < 2) {
     return NextResponse.json({ results: [], error: "Query too short" });
   }
 
+  // Use new provider system if requested
+  if (useProviders || providerId) {
+    return handleProviderSearch(q, limit, type, providerId);
+  }
+
+  // Legacy direct API search (for backward compatibility)
+  return handleLegacySearch(q, limit, type);
+}
+
+/**
+ * Handle search using the provider system
+ */
+async function handleProviderSearch(
+  q: string,
+  limit: number,
+  type: string | null,
+  providerId: string | null
+): Promise<NextResponse> {
+  try {
+    // Initialize providers if not already done
+    await initializeProviders();
+
+    const searchType = type === "movie" ? "movie" : type === "series" ? "series" : "all";
+
+    let items: ProviderContentItem[];
+    let providerCounts: Record<string, number> = {};
+    let errors: Array<{ providerId: string; error: string }> = [];
+
+    if (providerId) {
+      // Search specific provider
+      items = await providerRegistry.searchProvider(providerId, {
+        query: q,
+        limit,
+        type: searchType,
+      });
+      providerCounts[providerId] = items.length;
+    } else {
+      // Search all enabled providers
+      const result = await providerRegistry.searchAll({
+        query: q,
+        limit,
+        type: searchType,
+      });
+      items = result.items;
+      providerCounts = result.providerCounts;
+      errors = result.errors;
+    }
+
+    // Collect unique topics for category lookup
+    const topics = [...new Set(items.map((item) => item.topic))] as string[];
+    const categoryMap = await getCategoriesForTopics(topics);
+
+    // Convert to SearchResult format
+    const results: SearchResult[] = items.map((item) =>
+      providerItemToSearchResult(item, categoryMap.get(item.topic))
+    );
+
+    return NextResponse.json({
+      results,
+      providerCounts,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error("Provider search error:", error);
+    return NextResponse.json({ results: [], error: "Search failed" }, { status: 500 });
+  }
+}
+
+/**
+ * Handle legacy direct API search (backward compatibility)
+ */
+async function handleLegacySearch(
+  q: string,
+  limit: number,
+  type: string | null
+): Promise<NextResponse> {
   // Fetch more results than needed because accessibility filtering may remove many
   // For movie search: at least 3x limit or 150
   // For regular search: at least 3x limit to ensure enough results after filtering
