@@ -56,8 +56,8 @@ async function searchMediathekApi(query: string): Promise<ApiResultItem[]> {
       return [];
     }
 
-    const data: MediathekSearchResult = await response.json();
-    return data.results || [];
+    const data = await response.json();
+    return data.result?.results || [];
   } catch (error) {
     console.error("[RulesetGenerator] Error searching MediathekView:", error);
     return [];
