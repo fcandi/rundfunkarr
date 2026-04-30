@@ -12,6 +12,7 @@ import {
 import {
   generateRssItems,
   generateMovieRssItems,
+  generateGenericRssItems,
   convertItemsToRss,
   serializeRss,
   getEmptyRssResult,
@@ -611,6 +612,8 @@ async function applyRulesetFilters(
 
       if (matchInfo) {
         matchedEpisodes.push(matchInfo);
+        const idx = unmatchedItems.indexOf(item);
+        if (idx > -1) unmatchedItems.splice(idx, 1);
         break;
       } else {
         const idx = unmatchedItems.indexOf(item);
@@ -829,11 +832,18 @@ export async function fetchSearchResultsByString(
     return serializeRss(getEmptyRssResult());
   }
 
-  const { matchedEpisodes } = await applyRulesetFilters(results);
+  const { matchedEpisodes, unmatchedItems } = await applyRulesetFilters(results);
   const newznabItems: NewznabItem[] = matchedEpisodes.flatMap((info) =>
     generateRssItems(info, quality)
   );
-  const response = convertItemsToRss(newznabItems, limit, offset);
+
+  // Include unmatched items (no ruleset) as generic results so they still appear in search
+  const genericItems: NewznabItem[] = unmatchedItems.flatMap((item) =>
+    generateGenericRssItems(item, quality)
+  );
+
+  const allItems = [...newznabItems, ...genericItems];
+  const response = convertItemsToRss(allItems, limit, offset);
 
   mediathekCache.set(cacheKey, { response });
   return response;
