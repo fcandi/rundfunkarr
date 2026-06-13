@@ -676,8 +676,11 @@ function createGenericRssItem(
     const seasonNum = parsed.season ?? 1;
     const paddedSeason = seasonNum.toString().padStart(2, "0");
     const paddedEpisode = parsed.episode.toString().padStart(2, "0");
-    const epName = parsed.episodeName || item.title;
-    rawTitle = `${item.topic}.S${paddedSeason}E${paddedEpisode}.${epName}.GERMAN.${quality}.WEB.h264-MEDiATHEK`;
+    // Omit the episode-name segment when the pattern consumed the whole title
+    // (e.g. "Staffel 2 Folge 3"), otherwise it duplicates the SxxExx info.
+    rawTitle = parsed.episodeName
+      ? `${item.topic}.S${paddedSeason}E${paddedEpisode}.${parsed.episodeName}.GERMAN.${quality}.WEB.h264-MEDiATHEK`
+      : `${item.topic}.S${paddedSeason}E${paddedEpisode}.GERMAN.${quality}.WEB.h264-MEDiATHEK`;
   } else {
     rawTitle = `${item.topic}.${item.title}.GERMAN.${quality}.WEB.h264-MEDiATHEK`;
   }

@@ -837,10 +837,14 @@ export async function fetchSearchResultsByString(
     generateRssItems(info, quality)
   );
 
-  // Include unmatched items (no ruleset) as generic results so they still appear in search
-  const genericItems: NewznabItem[] = unmatchedItems.flatMap((item) =>
-    generateGenericRssItems(item, quality)
-  );
+  // Generic (no-ruleset) results are only meaningful for an actual text search.
+  // A season-only query (e.g. tvsearch&season=01 with no q) would otherwise emit
+  // every title that merely contains "S01" across unrelated shows. Gate on a
+  // non-empty q to keep the previous (matched-only) behavior for those queries.
+  const hasTextQuery = !!q?.trim();
+  const genericItems: NewznabItem[] = hasTextQuery
+    ? unmatchedItems.flatMap((item) => generateGenericRssItems(item, quality))
+    : [];
 
   const allItems = [...newznabItems, ...genericItems];
   const response = convertItemsToRss(allItems, limit, offset);
