@@ -60,13 +60,13 @@ image: ghcr.io/rundfunkarr/rundfunkarr:nightly
 Für reproduzierbare Deployments kann statt `latest` auch eine feste Version verwendet werden:
 
 ```yaml
-image: ghcr.io/rundfunkarr/rundfunkarr:1.2.2
+image: ghcr.io/rundfunkarr/rundfunkarr:1.2.3
 ```
 
 Der Git-Tag-Alias mit `v`-Präfix ist ebenfalls verfügbar:
 
 ```bash
-docker pull ghcr.io/rundfunkarr/rundfunkarr:v1.2.2
+docker pull ghcr.io/rundfunkarr/rundfunkarr:v1.2.3
 ```
 
 ### Starten
