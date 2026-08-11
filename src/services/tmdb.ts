@@ -351,6 +351,31 @@ interface TmdbSearchMovieResult {
   }>;
 }
 
+type TmdbMovieSearchHit = TmdbSearchMovieResult["results"][number];
+
+/**
+ * Choose the search hit that best fits the requested year.
+ * Exported for tests; see the call site for why TMDB's own ranking is not enough.
+ */
+export function pickBestMovieResult(
+  results: TmdbMovieSearchHit[],
+  year?: number | null
+): TmdbMovieSearchHit {
+  if (!year) {
+    return results[0];
+  }
+
+  const yearOf = (r: TmdbMovieSearchHit): number =>
+    r.release_date ? parseInt(r.release_date.slice(0, 4), 10) : NaN;
+
+  return (
+    results.find((r) => yearOf(r) === year) ??
+    // NaN comparisons are false, so undated hits never win here.
+    results.find((r) => Math.abs(yearOf(r) - year) <= 1) ??
+    results[0]
+  );
+}
+
 /**
  * Search for a movie by title (and optionally year)
  * Returns the best matching movie from TMDB
@@ -404,9 +429,14 @@ export async function searchMovieByTitle(
       return null;
     }
 
-    // Get the first (best) match
-    const tmdbId = searchData.results[0].id;
-    console.log(`[TMDB] Found movie: "${searchData.results[0].title}" (TMDB ID: ${tmdbId})`);
+    // Pick the best match. TMDB's `year` parameter is a loose filter -- it
+    // matches release dates across all regions, so results[0] can be a
+    // different film that merely ranks higher for the same title. When a year
+    // is known, prefer a result that actually carries it (allowing +/-1 year
+    // for festival vs. regular release) before falling back to TMDB's ranking.
+    const best = pickBestMovieResult(searchData.results, year);
+    const tmdbId = best.id;
+    console.log(`[TMDB] Found movie: "${best.title}" (TMDB ID: ${tmdbId})`);
 
     // Get full movie info
     const movieData = await getMovieInfoByTmdbId(tmdbId);

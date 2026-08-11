@@ -102,9 +102,11 @@ describe("fetchSearchResultsByString – generic result gating", () => {
 describe("fetchMovieSearchByQuery – configured minimum duration", () => {
   it("includes movies at the configured boundary and rejects shorter results", async () => {
     mockedGetMinDuration.mockResolvedValue(2700);
+    // The release name comes from the item title, so distinguish the two
+    // candidates there rather than via the (shared) topic.
     mockApi([
-      makeItem({ topic: "Too Short", title: "Documentary", duration: 2699 }),
-      makeItem({ topic: "At Boundary", title: "Documentary", duration: 2700 }),
+      makeItem({ topic: "Kino - Filme", title: "Too Short", duration: 2699 }),
+      makeItem({ topic: "Kino - Filme", title: "At Boundary", duration: 2700 }),
     ]);
 
     const xml = await fetchMovieSearchByQuery("Documentary", 100, 0);
@@ -115,6 +117,55 @@ describe("fetchMovieSearchByQuery – configured minimum duration", () => {
       expect.stringContaining("movie_query_Documentary__100_0_all_2700"),
       expect.any(Object)
     );
+  });
+});
+
+describe("fetchMovieSearchByQuery – release title", () => {
+  // Regression for ARTE anthology strands: "Lost Country" airs under the topic
+  // "Kino - Filme" (ARTE.DE) / "Cinéma - Films" (ARTE.FR). Naming the release
+  // after the topic made every film of the strand share one release name and
+  // Radarr rejected it: "Unknown Movie. Unable to match to correct movie using
+  // release title."
+  it("names the release after the film, not the anthology strand it aired in", async () => {
+    mockApi([
+      makeItem({
+        topic: "Kino - Filme",
+        title: "Lost Country (Originalversion mit Untertitel)",
+        duration: 6032,
+      }),
+    ]);
+
+    const xml = await fetchMovieSearchByQuery("Lost Country 2023", 100, 0);
+
+    expect(xml).toContain("Lost.Country.2023.GERMAN");
+    expect(xml).not.toContain("Kino.-.Filme");
+    // The accessibility annotation must not leak into the release name.
+    expect(xml).not.toContain("Untertitel");
+  });
+
+  it("uses the year Radarr asked for, not the Mediathek index timestamp", async () => {
+    mockApi([
+      makeItem({
+        topic: "Kino - Filme",
+        title: "Lost Country",
+        duration: 6032,
+        // Entered the index in 2026, but the film is from 2023.
+        filmlisteTimestamp: 1_785_186_890,
+      }),
+    ]);
+
+    const xml = await fetchMovieSearchByQuery("Lost Country 2023", 100, 0);
+
+    expect(xml).toContain("Lost.Country.2023.GERMAN");
+    expect(xml).not.toContain("Lost.Country.2026");
+  });
+
+  it("falls back to the topic when the item has no usable title", async () => {
+    mockApi([makeItem({ topic: "Der Film", title: "", duration: 6032 })]);
+
+    const xml = await fetchMovieSearchByQuery("Der Film", 100, 0);
+
+    expect(xml).toContain("Der.Film");
   });
 });
 
