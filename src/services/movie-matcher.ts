@@ -1,8 +1,36 @@
 import type { ApiResultItem, TmdbMovieData } from "@/types";
 import { getSetting } from "@/lib/settings";
+import { hasPartMarker, stripBroadcastAnnotations } from "@/lib/titles";
 
 // Default duration tolerance in minutes
 const DEFAULT_DURATION_TOLERANCE = 10;
+
+// A film's Mediathek entry may deviate from TMDB's runtime -- TV cuts, PAL
+// speed-up, differing credit lengths -- but only within a band. Everything far
+// outside it is a different piece of content that merely carries the film's
+// name: a featurette, an interview, a making-of, or one part of a serialised
+// broadcast. The duration used to be a scoring input only, which let a 6-minute
+// festival clip named "Nevrland" win against the 89-minute film.
+const MIN_RUNTIME_RATIO = 0.6;
+const MAX_RUNTIME_RATIO = 1.4;
+
+/**
+ * Is this item's length plausible for the film? Unknown runtimes (TMDB has no
+ * value) get the benefit of the doubt -- the minimum-duration setting is the
+ * only guard left in that case.
+ */
+export function isRuntimePlausible(
+  itemDurationSeconds: number,
+  movieRuntimeMinutes: number
+): boolean {
+  if (!movieRuntimeMinutes || movieRuntimeMinutes <= 0) return true;
+
+  const itemMinutes = itemDurationSeconds / 60;
+  return (
+    itemMinutes >= movieRuntimeMinutes * MIN_RUNTIME_RATIO &&
+    itemMinutes <= movieRuntimeMinutes * MAX_RUNTIME_RATIO
+  );
+}
 
 /**
  * Get the duration tolerance setting
@@ -64,6 +92,33 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 /**
+ * Does `haystack` contain `needle` as a whole word sequence?
+ *
+ * A plain `includes()` matches inside words, which is how an hr documentary
+ * titled "Milky Chance - Two High School Friends Making Music" passed as the
+ * film "Milk".
+ */
+function containsWholeWords(haystack: string, needle: string): boolean {
+  if (!needle) return false;
+
+  const words = haystack.split(" ").filter(Boolean);
+  const needleWords = needle.split(" ").filter(Boolean);
+  if (needleWords.length === 0 || needleWords.length > words.length) return false;
+
+  for (let i = 0; i + needleWords.length <= words.length; i++) {
+    if (needleWords.every((word, offset) => words[i + offset] === word)) return true;
+  }
+  return false;
+}
+
+/**
+ * Partial match in either direction, but always on word boundaries.
+ */
+function titlesOverlap(a: string, b: string): boolean {
+  return containsWholeWords(a, b) || containsWholeWords(b, a);
+}
+
+/**
  * Calculate string similarity (0-1)
  */
 function stringSimilarity(a: string, b: string): number {
@@ -106,15 +161,33 @@ export async function matchMovieItems(
     // Skip m3u8 streams
     if (item.url_video.endsWith(".m3u8")) continue;
 
-    const normalizedTopic = normalizeTitle(item.topic);
-    const normalizedTitle = normalizeTitle(item.title);
-    const combinedTitle = normalizeTitle(`${item.topic} ${item.title}`);
+    // Broadcast annotations ("(Originalversion mit Untertitel)") are not part
+    // of the film's name -- comparing with them attached turns an exact match
+    // into a partial one.
+    const normalizedTopic = normalizeTitle(stripBroadcastAnnotations(item.topic));
+    const normalizedTitle = normalizeTitle(stripBroadcastAnnotations(item.title));
+    const combinedTitle = normalizeTitle(stripBroadcastAnnotations(`${item.topic} ${item.title}`));
 
     // Item duration in minutes
     const itemDurationMinutes = Math.floor(item.duration / 60);
     const durationDiff = Math.abs(movieRuntimeMinutes - itemDurationMinutes);
 
     if (minDurationSeconds > 0 && item.duration < minDurationSeconds) continue;
+
+    // One part of a serialised broadcast is not the film.
+    if (hasPartMarker(item.title) || hasPartMarker(item.topic)) {
+      console.log(`[MovieMatcher] Skipping part of a serialised broadcast: "${item.title}"`);
+      continue;
+    }
+
+    // A length far off the film's runtime means different content under the
+    // same name (featurette, interview, making-of).
+    if (!isRuntimePlausible(item.duration, movieRuntimeMinutes)) {
+      console.log(
+        `[MovieMatcher] Skipping "${item.title}" (${itemDurationMinutes} min): implausible for a ${movieRuntimeMinutes} min film`
+      );
+      continue;
+    }
 
     let titleMatch: "exact" | "fuzzy" | "partial" | null = null;
     let titleScore = 0;
@@ -141,10 +214,8 @@ export async function matchMovieItems(
         titleMatch = "fuzzy";
         titleScore = bestSimilarity * 100;
       } else if (
-        normalizedTopic.includes(normalizedGermanTitle) ||
-        normalizedGermanTitle.includes(normalizedTopic) ||
-        normalizedTitle.includes(normalizedGermanTitle) ||
-        normalizedGermanTitle.includes(normalizedTitle)
+        titlesOverlap(normalizedTopic, normalizedGermanTitle) ||
+        titlesOverlap(normalizedTitle, normalizedGermanTitle)
       ) {
         titleMatch = "partial";
         titleScore = 60;
@@ -173,10 +244,8 @@ export async function matchMovieItems(
           titleMatch = "fuzzy";
           titleScore = bestSimilarity * 90;
         } else if (
-          normalizedTopic.includes(normalizedOriginalTitle) ||
-          normalizedOriginalTitle.includes(normalizedTopic) ||
-          normalizedTitle.includes(normalizedOriginalTitle) ||
-          normalizedOriginalTitle.includes(normalizedTitle)
+          titlesOverlap(normalizedTopic, normalizedOriginalTitle) ||
+          titlesOverlap(normalizedTitle, normalizedOriginalTitle)
         ) {
           titleMatch = "partial";
           titleScore = 55;
