@@ -62,10 +62,19 @@ function mockApi(results: ApiResultItem[]): void {
   } as Response);
 }
 
+/** Reachability probes (HEAD) go through the global fetch; default: alive. */
+function mockReachability(statusByUrl: Record<string, number> = {}): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => ({ status: statusByUrl[url] ?? 200 }) as Response)
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockedGetMinDuration.mockResolvedValue(300);
   mockedSearchMovieByTitle.mockResolvedValue(null);
+  mockReachability();
 });
 
 describe("fetchSearchResultsByString – generic result gating", () => {
@@ -227,6 +236,46 @@ describe("fetchMovieSearchByQuery – plausibility of the emitted releases", () 
 
     expect(xml).toContain('total="0"');
     expect(xml).not.toContain("<item>");
+  });
+
+  it("drops an entry whose video the broadcaster has taken down", async () => {
+    // The MediathekView index outlives the media: "Leid und Herrlichkeit" was
+    // still listed weeks after ARTE removed the file, and every search turned
+    // into a failed download plus a blocklist entry in Radarr.
+    mockedSearchMovieByTitle.mockResolvedValue(nevrland);
+    mockApi([
+      makeItem({
+        topic: "Spielfilm",
+        title: "Nevrland",
+        duration: 5098,
+        url_video: "https://example.com/gone_720.mp4",
+        url_video_hd: "https://example.com/gone_1080.mp4",
+        url_video_low: "",
+      }),
+    ]);
+    mockReachability({ "https://example.com/gone_1080.mp4": 404 });
+
+    const xml = await fetchMovieSearchByQuery("Nevrland 2019", 100, 0);
+
+    expect(xml).toContain('total="0"');
+    expect(xml).not.toContain("<item>");
+  });
+
+  it("keeps an entry when the probe itself fails", async () => {
+    // A timeout or a CDN that dislikes HEAD is not proof of absence -- losing a
+    // film we could have had is worse than one failed download.
+    mockedSearchMovieByTitle.mockResolvedValue(nevrland);
+    mockApi([makeItem({ topic: "Spielfilm", title: "Nevrland", duration: 5098 })]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("timeout");
+      })
+    );
+
+    const xml = await fetchMovieSearchByQuery("Nevrland 2019", 100, 0);
+
+    expect(xml).toContain("<item>");
   });
 
   it("still emits the film itself", async () => {

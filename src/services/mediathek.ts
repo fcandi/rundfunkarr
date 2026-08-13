@@ -19,6 +19,7 @@ import {
   QualityPreference,
 } from "./newznab";
 import { matchMovieItems } from "./movie-matcher";
+import { dropGoneItems } from "@/lib/reachability";
 import { hasPartMarker, stripBroadcastAnnotations } from "@/lib/titles";
 import { searchMovieByTitle } from "./tmdb";
 import type {
@@ -57,6 +58,15 @@ async function getQualityPreference(): Promise<QualityPreference> {
 
 // Keywords that are always skipped (trailers, outtakes, etc.)
 const SKIP_KEYWORDS = ["Trailer", "Outtakes:", "(klare Sprache)"];
+
+/**
+ * The variant a reachability probe should use: a Mediathek asset expires as a
+ * whole, so probing the highest quality on offer stands in for all of them --
+ * and that is the one Radarr grabs under a normal quality profile.
+ */
+function preferredUrl(item: ApiResultItem): string {
+  return item.url_video_hd || item.url_video || item.url_video_low;
+}
 
 async function fetchMediathekViewApiResponse(
   queries: Array<{ fields: string[]; query: string }>,
@@ -994,7 +1004,16 @@ export async function fetchMovieSearchResults(
   }
 
   // Match results against movie data
-  const matchResults = await matchMovieItems(filteredResults, movieData, minDuration);
+  const matched = await matchMovieItems(filteredResults, movieData, minDuration);
+
+  // The index outlives the media: drop entries whose video the broadcaster has
+  // already taken down, so they cannot turn into a failed download.
+  const matchResults = await dropGoneItems(matched, (match) => preferredUrl(match.item));
+  if (matchResults.length < matched.length) {
+    console.log(
+      `[Mediathek] Dropped ${matched.length - matchResults.length} entr(ies) whose video is gone`
+    );
+  }
 
   if (matchResults.length === 0) {
     console.log(`[Mediathek] No matches found for movie`);
@@ -1111,9 +1130,18 @@ export async function fetchMovieSearchByQuery(
   // the movie matcher (whole-word title relation plus runtime plausibility) and
   // keep its ranking; without a TMDB hit, no IDs are attached and the coarse
   // filter above is all we can do.
-  const filteredResults = tmdbMovie
+  const matchedResults = tmdbMovie
     ? (await matchMovieItems(prefiltered, tmdbMovie, minDuration)).map((match) => match.item)
     : prefiltered;
+
+  // Same as in the tmdbid path: an entry the broadcaster has taken down would
+  // only become a failed download and a blocklist entry.
+  const filteredResults = await dropGoneItems(matchedResults, preferredUrl);
+  if (filteredResults.length < matchedResults.length) {
+    console.log(
+      `[Mediathek] Dropped ${matchedResults.length - filteredResults.length} entr(ies) whose video is gone`
+    );
+  }
 
   console.log(
     `[Mediathek] Results after movie filtering (min ${minDuration}s): ${filteredResults.length}`
