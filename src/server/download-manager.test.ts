@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { access, mkdtemp, readFile, rm } from "fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -102,6 +102,102 @@ describe("processDownload", () => {
       data: expect.objectContaining({
         status: "completed",
         filePath: path.join("/mapped/downloads", category, `${title}.mp4`),
+      }),
+    });
+  });
+
+  it("recovers when the category directory is removed mid-download", async () => {
+    const mediaBytes = new Uint8Array([5, 6, 7, 8]);
+    const title = "Show.S01E02";
+    const category = "sonarr";
+    const categoryDir = path.join(testRoot, category);
+
+    configFindUnique.mockImplementation(({ where }: { where: { key: string } }) => {
+      if (where.key === "download.path") return Promise.resolve({ value: testRoot });
+      if (where.key === "download.convertToMkv") return Promise.resolve({ value: "false" });
+      return Promise.resolve(null);
+    });
+    downloadFindUnique.mockResolvedValue({
+      id: "download-2",
+      title,
+      category,
+      status: "queued",
+      url: "https://example.com/video.mp4",
+    });
+    downloadUpdate.mockResolvedValue({});
+    downloadCount.mockResolvedValue(0);
+    // An *arr app imports an earlier download and deletes the then-empty
+    // category folder while this one is still transferring.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () => {
+        await rm(categoryDir, { recursive: true, force: true });
+        return new Response(mediaBytes, {
+          status: 200,
+          headers: { "content-length": String(mediaBytes.byteLength) },
+        });
+      })
+    );
+
+    await processDownload("download-2");
+
+    await expect(readFile(path.join(categoryDir, `${title}.mp4`))).resolves.toEqual(
+      Buffer.from(mediaBytes)
+    );
+    expect(downloadUpdate).toHaveBeenCalledWith({
+      where: { id: "download-2" },
+      data: expect.objectContaining({ status: "completed" }),
+    });
+  });
+
+  it("recovers when the category directory is removed during MKV conversion", async () => {
+    const mediaBytes = new Uint8Array([9, 10, 11, 12]);
+    const mkvBytes = new Uint8Array([13, 14, 15, 16]);
+    const title = "Show.S01E03";
+    const category = "sonarr";
+    const categoryDir = path.join(testRoot, category);
+
+    configFindUnique.mockImplementation(({ where }: { where: { key: string } }) => {
+      if (where.key === "download.path") return Promise.resolve({ value: testRoot });
+      if (where.key === "download.convertToMkv") return Promise.resolve({ value: "true" });
+      return Promise.resolve(null);
+    });
+    downloadFindUnique.mockResolvedValue({
+      id: "download-3",
+      title,
+      category,
+      status: "queued",
+      url: "https://example.com/video.mp4",
+    });
+    downloadUpdate.mockResolvedValue({});
+    downloadCount.mockResolvedValue(0);
+    convertMp4ToMkv.mockImplementation(async (_source: string, target: string) => {
+      await writeFile(target, mkvBytes);
+      // The folder disappears while ffmpeg is busy -- this is the window that
+      // stranded finished files before the fix.
+      await rm(categoryDir, { recursive: true, force: true });
+      return { success: true };
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(mediaBytes, {
+          status: 200,
+          headers: { "content-length": String(mediaBytes.byteLength) },
+        })
+      )
+    );
+
+    await processDownload("download-3");
+
+    await expect(readFile(path.join(categoryDir, `${title}.mkv`))).resolves.toEqual(
+      Buffer.from(mkvBytes)
+    );
+    expect(downloadUpdate).toHaveBeenCalledWith({
+      where: { id: "download-3" },
+      data: expect.objectContaining({
+        status: "completed",
+        filePath: path.join("/mapped/downloads", category, `${title}.mkv`),
       }),
     });
   });

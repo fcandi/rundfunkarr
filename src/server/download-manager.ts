@@ -172,7 +172,12 @@ async function processDownload(downloadId: string): Promise<void> {
         return;
       }
 
-      // Move completed MKV to final location
+      // Move completed MKV to final location. Re-create the category directory
+      // first: it was created when this download started, but *arr apps remove
+      // the imported file from the category folder while later downloads are
+      // still running, and they delete the folder once it is empty. Without
+      // this the rename fails with ENOENT and the finished file is stranded.
+      await fs.mkdir(categoryDir, { recursive: true });
       console.log(`[Download] Moving to final location: ${finalMkvPath}`);
       await fs.rename(tempMkvPath, finalMkvPath);
 
@@ -208,6 +213,9 @@ async function processDownload(downloadId: string): Promise<void> {
     } else {
       // Keep non-MP4 files and MP4 files with disabled conversion unchanged.
       const finalPath = path.join(categoryDir, `${download.title}${fileExtension}`);
+      // Same reason as above: the category directory may have been removed by
+      // the *arr app while this download was running.
+      await fs.mkdir(categoryDir, { recursive: true });
       await fs.rename(mp4Path, finalPath);
 
       const stats = await fs.stat(finalPath);
