@@ -334,3 +334,98 @@ describe("fetchMovieSearchResults – configured minimum duration", () => {
     );
   });
 });
+
+describe("accessibility versions are never offered as the regular release", () => {
+  it("drops an audio-described episode from a text search", async () => {
+    // The case that started this: for "Die Augenzeugen" the broadcaster kept
+    // only the audio-described versions online. Offering them as the regular
+    // episode puts a spoken picture description into the library.
+    mockApi([
+      makeItem({ topic: "Die Augenzeugen", title: "Folge 2: Lügen (S01/E02) (Audiodeskription)" }),
+    ]);
+
+    const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
+
+    expect(xml).toContain('total="0"');
+    expect(xml).not.toContain("<item>");
+  });
+
+  it("keeps the regular episode next to the audio-described one", async () => {
+    mockApi([
+      makeItem({ topic: "Die Augenzeugen", title: "Folge 1: Schweigen (S01/E01)" }),
+      makeItem({
+        topic: "Die Augenzeugen",
+        title: "Folge 1: Schweigen (S01/E01) (Audiodeskription)",
+      }),
+    ]);
+
+    const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
+
+    expect(xml).toContain("Schweigen");
+    expect(xml).not.toContain("Audiodeskription");
+    expect((xml.match(/<item>/g) || []).length).toBeGreaterThan(0);
+  });
+
+  it("drops a sign-language film from a movie search", async () => {
+    mockApi([
+      makeItem({ topic: "Kino - Filme", title: "Der Film (Gebärdensprache)", duration: 5400 }),
+    ]);
+
+    const xml = await fetchMovieSearchByQuery("Der Film", 100, 0);
+
+    expect(xml).toContain('total="0"');
+  });
+
+  it("still offers a language variant -- OmU is a legitimate audio track", async () => {
+    mockApi([
+      makeItem({
+        topic: "Die Augenzeugen",
+        title: "Folge 3: Kontrollverlust (S01/E03) (Originalversion mit Untertitel)",
+      }),
+    ]);
+
+    const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
+
+    expect(xml).toContain("<item>");
+  });
+});
+
+describe("series releases point at media that is still there", () => {
+  it("drops an episode whose video the broadcaster has taken down", async () => {
+    // Same trap as on the movie side: Sonarr answers the failed download by
+    // blocklisting the release, which then blocks it even once it is valid again.
+    const item = makeItem({
+      topic: "Die Augenzeugen",
+      title: "Folge 1: Schweigen (S01/E01)",
+      url_video_hd: "https://example.com/gone_1080.mp4",
+    });
+    mockApi([item]);
+    mockReachability({ "https://example.com/gone_1080.mp4": 404 });
+
+    const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
+
+    expect(xml).toContain('total="0"');
+    expect(xml).not.toContain("<item>");
+  });
+
+  it("keeps the episode when the probe itself fails", async () => {
+    // A timeout or a CDN that dislikes HEAD is not proof of absence -- losing an
+    // episode we could have had is worse than one failed download.
+    const item = makeItem({
+      topic: "Die Augenzeugen",
+      title: "Folge 1: Schweigen (S01/E01)",
+      url_video_hd: "https://example.com/flaky_1080.mp4",
+    });
+    mockApi([item]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      })
+    );
+
+    const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
+
+    expect(xml).toContain("<item>");
+  });
+});

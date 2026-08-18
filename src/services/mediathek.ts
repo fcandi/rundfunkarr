@@ -20,7 +20,7 @@ import {
 } from "./newznab";
 import { matchMovieItems } from "./movie-matcher";
 import { dropGoneItems } from "@/lib/reachability";
-import { hasPartMarker, stripBroadcastAnnotations } from "@/lib/titles";
+import { hasPartMarker, isAccessibilityVersion, stripBroadcastAnnotations } from "@/lib/titles";
 import { searchMovieByTitle } from "./tmdb";
 import type {
   ApiResultItem,
@@ -57,7 +57,7 @@ async function getQualityPreference(): Promise<QualityPreference> {
 }
 
 // Keywords that are always skipped (trailers, outtakes, etc.)
-const SKIP_KEYWORDS = ["Trailer", "Outtakes:", "(klare Sprache)"];
+const SKIP_KEYWORDS = ["Trailer", "Outtakes:"];
 
 /**
  * The variant a reachability probe should use: a Mediathek asset expires as a
@@ -103,6 +103,7 @@ function shouldSkipItem(item: ApiResultItem, minDuration: number): boolean {
   // Skip m3u8 streams, items with skip keywords, and items shorter than minDuration
   if (item.url_video.endsWith(".m3u8")) return true;
   if (SKIP_KEYWORDS.some((kw) => item.title.includes(kw))) return true;
+  if (isAccessibilityVersion(item.title) || isAccessibilityVersion(item.topic)) return true;
   if (minDuration > 0 && item.duration < minDuration) return true;
   return false;
 }
@@ -508,6 +509,24 @@ async function matchesItemTitleEqualsAirdate(
   };
 }
 
+/**
+ * Drop matched episodes whose video the broadcaster has taken down.
+ *
+ * Same reasoning as in the movie paths: the MediathekView index outlives the
+ * media, and Sonarr answers a failed download by blocklisting the release --
+ * which then blocks the entry even after it becomes valid again. One probe per
+ * matched episode is enough, because a Mediathek asset expires as a whole.
+ */
+async function dropGoneEpisodes(matched: MatchedEpisodeInfo[]): Promise<MatchedEpisodeInfo[]> {
+  const alive = await dropGoneItems(matched, (info) => preferredUrl(info.item));
+  if (alive.length < matched.length) {
+    console.log(
+      `[Mediathek] Dropped ${matched.length - alive.length} episode(s) whose video is gone`
+    );
+  }
+  return alive;
+}
+
 async function applyRulesetFilters(
   results: ApiResultItem[],
   tvdbData?: TvdbData
@@ -774,7 +793,9 @@ export async function fetchSearchResultsById(
   const matchedDesiredEpisodes = applyDesiredEpisodeFilter(matchedEpisodes, desiredEpisodes);
   console.log(`[Mediathek] Matched desired episodes: ${matchedDesiredEpisodes.length}`);
 
-  const newznabItems: NewznabItem[] = matchedDesiredEpisodes.flatMap((info) =>
+  const reachableEpisodes = await dropGoneEpisodes(matchedDesiredEpisodes);
+
+  const newznabItems: NewznabItem[] = reachableEpisodes.flatMap((info) =>
     generateRssItems(info, quality)
   );
   console.log(`[Mediathek] Generated ${newznabItems.length} Newznab items (quality: ${quality})`);
@@ -840,7 +861,8 @@ export async function fetchSearchResultsByString(
   }
 
   const { matchedEpisodes, unmatchedItems } = await applyRulesetFilters(results);
-  const newznabItems: NewznabItem[] = matchedEpisodes.flatMap((info) =>
+  const reachableEpisodes = await dropGoneEpisodes(matchedEpisodes);
+  const newznabItems: NewznabItem[] = reachableEpisodes.flatMap((info) =>
     generateRssItems(info, quality)
   );
 
@@ -849,9 +871,12 @@ export async function fetchSearchResultsByString(
   // every title that merely contains "S01" across unrelated shows. Gate on a
   // non-empty q to keep the previous (matched-only) behavior for those queries.
   const hasTextQuery = !!trimmedQ;
-  const genericItems: NewznabItem[] = hasTextQuery
-    ? unmatchedItems.flatMap((item) => generateGenericRssItems(item, quality))
-    : [];
+  // Generic items skip the ruleset match, but they are handed to Sonarr just
+  // the same -- so they need the same reachability guarantee as matched ones.
+  const reachableUnmatched = hasTextQuery ? await dropGoneItems(unmatchedItems, preferredUrl) : [];
+  const genericItems: NewznabItem[] = reachableUnmatched.flatMap((item) =>
+    generateGenericRssItems(item, quality)
+  );
 
   const allItems = [...newznabItems, ...genericItems];
   const response = convertItemsToRss(allItems, limit, offset);
@@ -1117,6 +1142,7 @@ export async function fetchMovieSearchByQuery(
   const prefiltered = results.filter((item) => {
     if (item.url_video.endsWith(".m3u8")) return false;
     if (SKIP_KEYWORDS.some((kw) => item.title.includes(kw))) return false;
+    if (isAccessibilityVersion(item.title) || isAccessibilityVersion(item.topic)) return false;
     if (minDuration > 0 && item.duration < minDuration) return false;
     if (hasPartMarker(item.title) || hasPartMarker(item.topic)) return false;
     return true;
