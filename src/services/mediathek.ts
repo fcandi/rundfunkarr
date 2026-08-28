@@ -356,6 +356,19 @@ function tryParseDate(dateString: string): Date | null {
   return null;
 }
 
+/**
+ * The one season a show has, or null if that is not a single answer.
+ *
+ * Specials (season 0) do not count as a season here: they are extras attached
+ * to the run, not a numbering the broadcaster's "(1/6)" could ever refer to.
+ */
+function soleSeasonNumber(tvdbData: TvdbData): number | null {
+  const seasons = new Set(
+    tvdbData.episodes.map((ep) => ep.seasonNumber).filter((n) => n > 0)
+  );
+  return seasons.size === 1 ? [...seasons][0] : null;
+}
+
 async function matchesSeasonAndEpisode(
   item: ApiResultItem,
   ruleset: Ruleset
@@ -366,9 +379,15 @@ async function matchesSeasonAndEpisode(
   const season = extractValueUsingRegex(item, ruleset.seasonRegex);
   const episode = extractValueUsingRegex(item, ruleset.episodeRegex);
 
-  if (!season || !episode) return null;
+  if (!episode) return null;
 
-  const seasonNum = parseInt(season);
+  // Some broadcasters number episodes without ever naming the season ("Titel
+  // (1/6)"). That is unambiguous exactly as long as the show has a single
+  // season -- with more than one, guessing would silently file the episode
+  // under the wrong one, so refuse instead.
+  const seasonNum = season ? parseInt(season) : soleSeasonNumber(tvdbData);
+  if (seasonNum === null) return null;
+
   const episodeNum = parseInt(episode);
   if (isNaN(seasonNum) || isNaN(episodeNum)) return null;
 
@@ -379,7 +398,7 @@ async function matchesSeasonAndEpisode(
     episode: matchedEpisode,
     item,
     showName: tvdbData.name || tvdbData.germanName || "",
-    matchedTitle: `S${season}E${episode}`,
+    matchedTitle: `S${seasonNum}E${episodeNum}`,
     tvdbId: ruleset.media.media_tvdbId,
   };
 }

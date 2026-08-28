@@ -59,7 +59,7 @@ model Config {
 
 model GeneratedRuleset {
   id               String   @id @default(uuid())
-  topic            String   @unique  // MediathekView topic
+  topic            String   // MediathekView topic (collective slots hold several shows)
   tvdbId           Int
   showName         String
   germanName       String?
@@ -71,6 +71,7 @@ model GeneratedRuleset {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
+  @@unique([topic, tvdbId])
   @@index([tvdbId])
 }
 

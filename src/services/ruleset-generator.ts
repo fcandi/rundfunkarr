@@ -1,5 +1,14 @@
 import { prisma } from "@/lib/db";
 import type { Ruleset, TvdbData, ApiResultItem } from "@/types";
+import { stripBroadcastAnnotations } from "@/lib/titles";
+
+/**
+ * "Titel (1/6)" -- ARTE numbers the episodes of a season this way and gives no
+ * season at all. Only accepted when the title carries no season of its own:
+ * "Mord im Mittsommer - Staffel 7 (2/4)" is episode 2 of season *seven*, and
+ * reading "(2/4)" alone would file it under season 1.
+ */
+const COUNT_OF_PATTERN = /^(?!.*(?:\bS\d{1,4}\b|Staffel\s*\d+)).*\((\d{1,3})\/\d{1,3}\)/i;
 
 // Common German show name patterns in MediathekView
 const SEASON_EPISODE_PATTERNS = [
@@ -7,6 +16,7 @@ const SEASON_EPISODE_PATTERNS = [
   /\bS(\d{1,4})E(\d{1,4})\b/, // S01E01
   /Staffel\s*(\d+).*Folge\s*(\d+)/i, // Staffel 1 Folge 1
   /Staffel\s*(\d+).*Episode\s*(\d+)/i, // Staffel 1 Episode 1
+  COUNT_OF_PATTERN, // "Familiengeheimnisse (1/6)" -- episode only, no season
 ];
 
 const DATE_PATTERNS = [
@@ -39,13 +49,19 @@ async function searchMediathekApi(query: string): Promise<ApiResultItem[]> {
       body: JSON.stringify({
         queries: [
           {
-            fields: ["topic"],
+            // Mirror the search path in `mediathek.ts`: broadcasters that run a
+            // series inside a collective slot ("Fernsehfilme und Serien - Serien")
+            // carry the show name in `title`, never in `topic`. Searching `topic`
+            // alone finds nothing for them, so no ruleset was ever generated.
+            fields: ["topic", "title"],
             query: query,
           },
         ],
         sortBy: "timestamp",
         sortOrder: "desc",
-        future: false,
+        // Entries carry the (future) broadcast date while already being online:
+        // ARTE publishes a whole series months before it airs on TV.
+        future: true,
         offset: 0,
         size: 50,
       }),
@@ -65,9 +81,54 @@ async function searchMediathekApi(query: string): Promise<ApiResultItem[]> {
 }
 
 /**
- * Find the best matching topic from MediathekView results
+ * Where a broadcaster keeps the show name.
+ *
+ * `topic` is the normal case: ARD and ZDF give each series its own topic, so a
+ * ruleset keyed on the topic describes exactly that series.
+ *
+ * `title` is the collective-slot case: ARTE files every series under one topic
+ * ("Fernsehfilme und Serien - Serien") and puts the show name in the title.
+ * A ruleset on that topic alone would swallow every other ARTE series, so it
+ * carries an additional title filter that scopes it back down to this show.
  */
-function findBestMatchingTopic(results: ApiResultItem[], showInfo: TvdbData): string | null {
+interface TopicResolution {
+  topic: string;
+  /** Show name the title filter is built from; null for the plain topic case. */
+  titleScope: string | null;
+}
+
+/**
+ * Escape special regex characters in a string
+ */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build the regex that isolates one show inside a collective topic.
+ *
+ * Anchored at the start and closed off with a lookahead instead of `\b`, so
+ * that "Tatort" does not also take "Tatortreiniger" while a name ending in a
+ * non-word character still matches. Deliberately no `u` flag: `filterMatches`
+ * compiles the pattern with `new RegExp(value)`.
+ */
+export function buildTitleScopeRegex(showName: string): string {
+  return `^${escapeRegex(showName)}(?![A-Za-z0-9\u00c0-\u024f])`;
+}
+
+function titleBelongsToShow(title: string, showName: string): boolean {
+  return new RegExp(buildTitleScopeRegex(showName), "i").test(
+    stripBroadcastAnnotations(title)
+  );
+}
+
+/**
+ * Find the topic a ruleset for this show should be keyed on
+ */
+function findBestMatchingTopic(
+  results: ApiResultItem[],
+  showInfo: TvdbData
+): TopicResolution | null {
   if (results.length === 0) return null;
 
   // Get unique topics
@@ -86,7 +147,7 @@ function findBestMatchingTopic(results: ApiResultItem[], showInfo: TvdbData): st
     for (const name of searchNames) {
       if (topicLower === name) {
         console.log(`[RulesetGenerator] Exact topic match: "${topic}"`);
-        return topic;
+        return { topic, titleScope: null };
       }
     }
   }
@@ -97,15 +158,45 @@ function findBestMatchingTopic(results: ApiResultItem[], showInfo: TvdbData): st
     for (const name of searchNames) {
       if (topicLower.includes(name) || name.includes(topicLower)) {
         console.log(`[RulesetGenerator] Partial topic match: "${topic}"`);
-        return topic;
+        return { topic, titleScope: null };
       }
     }
+  }
+
+  // No topic carries the name -- look for a collective slot whose *titles* do.
+  // Counted per topic so that a stray mention elsewhere cannot outvote the slot
+  // the series actually runs in.
+  const originalNames = [
+    showInfo.germanName,
+    showInfo.name,
+    ...showInfo.aliases.map((a) => a.name),
+  ].filter(Boolean) as string[];
+
+  let best: { topic: string; showName: string; count: number } | null = null;
+  for (const name of originalNames) {
+    const countsByTopic = new Map<string, number>();
+    for (const item of results) {
+      if (!titleBelongsToShow(item.title, name)) continue;
+      countsByTopic.set(item.topic, (countsByTopic.get(item.topic) || 0) + 1);
+    }
+    for (const [topic, count] of countsByTopic) {
+      if (!best || count > best.count) best = { topic, showName: name, count };
+    }
+    if (best) break; // German name wins over English name and aliases
+  }
+
+  if (best) {
+    console.log(
+      `[RulesetGenerator] Title match inside collective topic "${best.topic}": ` +
+        `${best.count} entries titled "${best.showName}"`
+    );
+    return { topic: best.topic, titleScope: best.showName };
   }
 
   // If only one topic in results, use it
   if (topics.length === 1) {
     console.log(`[RulesetGenerator] Using single topic: "${topics[0]}"`);
-    return topics[0];
+    return { topic: topics[0], titleScope: null };
   }
 
   console.log(`[RulesetGenerator] No matching topic found. Available: ${topics.join(", ")}`);
@@ -229,13 +320,6 @@ function detectMatchingStrategy(results: ApiResultItem[], topic: string): string
 }
 
 /**
- * Escape special regex characters in a string
- */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
  * Generate regex patterns based on detected format
  */
 function generateRegexPatterns(
@@ -272,6 +356,18 @@ function generateRegexPatterns(
           titleRegexRules: "[]",
         };
       }
+    }
+
+    // Checked only after the explicit patterns, and over all samples: an entry
+    // that states its season must never be read as a bare "(episode/total)".
+    if (results.slice(0, 5).some((result) => COUNT_OF_PATTERN.test(result.title))) {
+      return {
+        episodeRegex: "\\((\\d{1,3})/\\d{1,3}\\)",
+        // No season in the title -- `matchesSeasonAndEpisode` fills it in for
+        // single-season shows and refuses to guess for anything else.
+        seasonRegex: "",
+        titleRegexRules: "[]",
+      };
     }
   }
 
@@ -477,41 +573,60 @@ export async function generateRulesetForShow(
   return generateRulesetFromResults(tvdbId, showInfo, results);
 }
 
+function buildFilters(titleScope: string | null): string {
+  const filters: Array<{ attribute: string; type: string; value: string }> = [
+    { attribute: "duration", type: "GreaterThan", value: "15" },
+  ];
+
+  // A collective topic holds every series of that slot. Without this filter the
+  // ruleset would claim all of them and hand Sonarr a foreign show's episodes.
+  if (titleScope) {
+    filters.push({
+      attribute: "title",
+      type: "Regex",
+      value: buildTitleScopeRegex(titleScope),
+    });
+  }
+
+  return JSON.stringify(filters);
+}
+
 async function generateRulesetFromResults(
   tvdbId: number,
   showInfo: TvdbData,
   results: ApiResultItem[]
 ): Promise<Ruleset | null> {
   // Find the best matching topic
-  const matchingTopic = findBestMatchingTopic(results, showInfo);
-  if (!matchingTopic) {
+  const resolution = findBestMatchingTopic(results, showInfo);
+  if (!resolution) {
     console.log("[RulesetGenerator] Could not find matching topic");
     return null;
   }
 
-  // Check if ruleset for this topic already exists
-  const existingByTopic = await prisma.generatedRuleset.findUnique({
-    where: { topic: matchingTopic },
+  const { topic: matchingTopic, titleScope } = resolution;
+
+  // Check if a ruleset for this topic and show already exists. Keyed on both
+  // because a collective topic legitimately carries one ruleset per series.
+  const existingByTopic = await prisma.generatedRuleset.findFirst({
+    where: { topic: matchingTopic, tvdbId },
   });
 
   if (existingByTopic) {
-    // Update TVDB ID if different
-    if (existingByTopic.tvdbId !== tvdbId) {
-      console.log(
-        `[RulesetGenerator] Topic "${matchingTopic}" exists with different TVDB ID (${existingByTopic.tvdbId} vs ${tvdbId})`
-      );
-    }
     return convertToRuleset(existingByTopic);
   }
 
-  // Detect matching strategy
-  const topicResults = results.filter((r) => r.topic === matchingTopic);
+  // Detect matching strategy -- only on the entries this ruleset will accept,
+  // otherwise the other shows of a collective slot decide the pattern.
+  const topicResults = results.filter(
+    (r) => r.topic === matchingTopic && (!titleScope || titleBelongsToShow(r.title, titleScope))
+  );
   const strategy = detectMatchingStrategy(topicResults, matchingTopic);
   const patterns = generateRegexPatterns(topicResults, strategy, matchingTopic);
 
   // Create new ruleset
   console.log(
-    `[RulesetGenerator] Creating new ruleset: topic="${matchingTopic}", strategy="${strategy}"`
+    `[RulesetGenerator] Creating new ruleset: topic="${matchingTopic}"` +
+      `${titleScope ? `, scoped to titles starting with "${titleScope}"` : ""}, strategy="${strategy}"`
   );
 
   const newRuleset = await prisma.generatedRuleset.create({
@@ -521,7 +636,7 @@ async function generateRulesetFromResults(
       showName: showInfo.name,
       germanName: showInfo.germanName,
       matchingStrategy: strategy,
-      filters: '[{"attribute":"duration","type":"GreaterThan","value":"15"}]',
+      filters: buildFilters(titleScope),
       episodeRegex: patterns.episodeRegex,
       seasonRegex: patterns.seasonRegex,
       titleRegexRules: patterns.titleRegexRules,
@@ -544,7 +659,7 @@ export async function getGeneratedRulesets(): Promise<Ruleset[]> {
  * Get generated ruleset for a specific topic
  */
 export async function getGeneratedRulesetByTopic(topic: string): Promise<Ruleset | null> {
-  const dbRuleset = await prisma.generatedRuleset.findUnique({
+  const dbRuleset = await prisma.generatedRuleset.findFirst({
     where: { topic },
   });
   return dbRuleset ? convertToRuleset(dbRuleset) : null;

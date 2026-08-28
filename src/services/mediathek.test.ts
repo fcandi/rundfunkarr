@@ -22,21 +22,30 @@ vi.mock("./rulesets", () => ({
 vi.mock("./tmdb", () => ({
   searchMovieByTitle: vi.fn().mockResolvedValue(null),
 }));
+vi.mock("./shows", () => ({
+  getShowInfoByTvdbId: vi.fn(),
+}));
 
 import {
   fetchMovieSearchByQuery,
   fetchMovieSearchResults,
+  fetchSearchResultsById,
   fetchSearchResultsByString,
 } from "./mediathek";
 import { fetchWithRetry } from "@/lib/fetch-retry";
 import { mediathekCache } from "@/lib/cache";
 import { getMinDurationSeconds } from "@/lib/settings";
 import { searchMovieByTitle } from "./tmdb";
+import { getShowInfoByTvdbId } from "./shows";
+import { getRulesetsForTopicAndTvdbId } from "./rulesets";
+import type { Ruleset, TvdbData, TvdbEpisode } from "@/types";
 
 const mockedSearchMovieByTitle = vi.mocked(searchMovieByTitle);
 const mockedFetch = vi.mocked(fetchWithRetry);
 const mockedGetMinDuration = vi.mocked(getMinDurationSeconds);
 const mockedCacheSet = vi.mocked(mediathekCache.set);
+const mockedGetShowInfo = vi.mocked(getShowInfoByTvdbId);
+const mockedGetRulesets = vi.mocked(getRulesetsForTopicAndTvdbId);
 
 function makeItem(overrides: Partial<ApiResultItem> = {}): ApiResultItem {
   return {
@@ -427,5 +436,104 @@ describe("series releases point at media that is still there", () => {
     const xml = await fetchSearchResultsByString("Die Augenzeugen", null, 100, 0);
 
     expect(xml).toContain("<item>");
+  });
+});
+
+describe("episodes numbered without a season", () => {
+  const ARTE_SLOT = "Fernsehfilme und Serien - Serien";
+
+  /** What the generator writes for a collective slot: "(episode/total)", no season. */
+  function countOfRuleset(overrides: Partial<Ruleset> = {}): Ruleset {
+    return {
+      id: 1,
+      mediaId: 446785,
+      topic: ARTE_SLOT,
+      priority: 0,
+      filters: JSON.stringify([
+        { attribute: "duration", type: "GreaterThan", value: "15" },
+        { attribute: "title", type: "Regex", value: "^Familiengeheimnisse(?![A-Za-z0-9])" },
+      ]),
+      titleRegexRules: "[]",
+      episodeRegex: "\\((\\d{1,3})/\\d{1,3}\\)",
+      seasonRegex: "",
+      matchingStrategy: "SeasonAndEpisodeNumber" as Ruleset["matchingStrategy"],
+      media: {
+        media_id: 446785,
+        media_name: "Pubertat",
+        media_type: "show",
+        media_tvdbId: 446785,
+        media_tmdbId: null,
+        media_imdbId: null,
+      },
+      ...overrides,
+    };
+  }
+
+  function makeShow(episodes: TvdbEpisode[]): TvdbData {
+    return {
+      id: 446785,
+      name: "Pubertat",
+      germanName: "Familiengeheimnisse",
+      aliases: [],
+      episodes,
+    } as unknown as TvdbData;
+  }
+
+  const singleSeason: TvdbEpisode[] = [1, 2, 3, 4, 5, 6].map((n) => ({
+    name: `Folge ${n}`,
+    aired: null,
+    runtime: 45,
+    seasonNumber: 1,
+    episodeNumber: n,
+  }));
+
+  it("files a bare (3/6) under the show's only season", async () => {
+    const show = makeShow(singleSeason);
+    mockedGetShowInfo.mockResolvedValue(show);
+    mockedGetRulesets.mockReturnValue([countOfRuleset()]);
+    mockApi([makeItem({ topic: ARTE_SLOT, title: "Familiengeheimnisse (3/6)" })]);
+
+    const xml = await fetchSearchResultsById(show, null, null, 100, 0);
+
+    expect(xml).toContain("S01E03");
+  });
+
+  it("refuses to guess the season when the show has more than one", async () => {
+    // Nothing in "(3/6)" says which season -- filing it under the first would
+    // hand Sonarr the wrong episode.
+    const show = makeShow([
+      ...singleSeason,
+      { name: "Folge 1", aired: null, runtime: 45, seasonNumber: 2, episodeNumber: 1 },
+    ]);
+    mockedGetShowInfo.mockResolvedValue(show);
+    mockedGetRulesets.mockReturnValue([countOfRuleset()]);
+    mockApi([makeItem({ topic: ARTE_SLOT, title: "Familiengeheimnisse (3/6)" })]);
+
+    const xml = await fetchSearchResultsById(show, null, null, 100, 0);
+
+    expect(xml).toContain('total="0"');
+  });
+
+  it("leaves the other shows of the collective slot alone", async () => {
+    const show = makeShow(singleSeason);
+    mockedGetShowInfo.mockResolvedValue(show);
+    mockedGetRulesets.mockReturnValue([countOfRuleset()]);
+    mockApi([
+      makeItem({ topic: ARTE_SLOT, title: "Familiengeheimnisse (3/6)" }),
+      makeItem({
+        topic: ARTE_SLOT,
+        title: "Eine fremde Serie (3/6)",
+        url_video: "https://example.com/fremde_720.mp4",
+        url_video_low: "https://example.com/fremde_480.mp4",
+        url_video_hd: "https://example.com/fremde_1080.mp4",
+      }),
+    ]);
+
+    const xml = await fetchSearchResultsById(show, null, null, 100, 0);
+
+    // Both entries are episode 3 of the same slot and would produce the very
+    // same release name, so the media URL is what tells them apart.
+    expect(xml).toContain("show_1080.mp4");
+    expect(xml).not.toContain("fremde");
   });
 });

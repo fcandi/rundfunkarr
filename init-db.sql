@@ -50,9 +50,13 @@ CREATE TABLE IF NOT EXISTS Config (
     value TEXT NOT NULL
 );
 
+-- `topic` is deliberately not unique on its own: broadcasters that run every
+-- series of a slot under one collective topic ("Fernsehfilme und Serien -
+-- Serien" at ARTE) need one ruleset per show on the same topic, each scoped by
+-- a title filter. Existing databases are migrated in entrypoint.sh.
 CREATE TABLE IF NOT EXISTS GeneratedRuleset (
     id TEXT PRIMARY KEY,
-    topic TEXT NOT NULL UNIQUE,
+    topic TEXT NOT NULL,
     tvdbId INTEGER NOT NULL,
     showName TEXT NOT NULL,
     germanName TEXT,
@@ -66,6 +70,8 @@ CREATE TABLE IF NOT EXISTS GeneratedRuleset (
 );
 
 CREATE INDEX IF NOT EXISTS GeneratedRuleset_tvdbId_idx ON GeneratedRuleset(tvdbId);
+CREATE UNIQUE INDEX IF NOT EXISTS GeneratedRuleset_topic_tvdbId_key
+ON GeneratedRuleset(topic, tvdbId);
 
 CREATE TABLE IF NOT EXISTS TopicCategory (
     id TEXT NOT NULL PRIMARY KEY,

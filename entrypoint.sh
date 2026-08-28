@@ -85,6 +85,44 @@ else
     fail "Database initialization failed. Check that /app/prisma/data is writable by UID $PUID/GID $PGID."
 fi
 
+# One-shot migration for databases created while `topic` was unique on its own.
+# SQLite cannot drop a column constraint in place, so the table is rebuilt. The
+# grep on the stored DDL keeps this a no-op on every later start.
+if su-exec "$USER_NAME" sqlite3 "$DB_PATH" "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'GeneratedRuleset';" | grep -q "topic TEXT NOT NULL UNIQUE"; then
+    echo "Migrating GeneratedRuleset: unique topic -> unique (topic, tvdbId)..."
+    if ! su-exec "$USER_NAME" sqlite3 "$DB_PATH" <<'SQL'
+BEGIN;
+CREATE TABLE GeneratedRuleset_migrated (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    tvdbId INTEGER NOT NULL,
+    showName TEXT NOT NULL,
+    germanName TEXT,
+    matchingStrategy TEXT DEFAULT 'SeasonAndEpisodeNumber',
+    filters TEXT DEFAULT '[{"attribute":"duration","type":"GreaterThan","value":"15"}]',
+    episodeRegex TEXT DEFAULT '(?<=[E/])(\d{2})(?=\))',
+    seasonRegex TEXT DEFAULT '(?<=[S(])(\d{2})(?=[/E])',
+    titleRegexRules TEXT DEFAULT '[]',
+    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO GeneratedRuleset_migrated
+SELECT id, topic, tvdbId, showName, germanName, matchingStrategy, filters,
+       episodeRegex, seasonRegex, titleRegexRules, createdAt, updatedAt
+FROM GeneratedRuleset;
+DROP TABLE GeneratedRuleset;
+ALTER TABLE GeneratedRuleset_migrated RENAME TO GeneratedRuleset;
+CREATE INDEX IF NOT EXISTS GeneratedRuleset_tvdbId_idx ON GeneratedRuleset(tvdbId);
+CREATE UNIQUE INDEX IF NOT EXISTS GeneratedRuleset_topic_tvdbId_key
+ON GeneratedRuleset(topic, tvdbId);
+COMMIT;
+SQL
+    then
+        fail "Migration of GeneratedRuleset failed. The database was left untouched."
+    fi
+    echo "GeneratedRuleset migrated"
+fi
+
 MISSING_TABLES=""
 for table in TvdbSeries TvdbEpisode Download Config GeneratedRuleset TopicCategory; do
     if ! su-exec "$USER_NAME" sqlite3 "$DB_PATH" "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '$table';" | grep -q 1; then
