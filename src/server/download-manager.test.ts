@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as fsp from "fs/promises";
 import { access, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+
+// Everything stays the real implementation; only `rename` is wrapped in a
+// vi.fn so a single test can inject a failure into its first call (ESM module
+// namespaces cannot be spied on directly).
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 import { tmpdir } from "os";
 import path from "path";
 
@@ -199,6 +208,57 @@ describe("processDownload", () => {
         status: "completed",
         filePath: path.join("/mapped/downloads", category, `${title}.mkv`),
       }),
+    });
+  });
+
+  it("recovers when the folder vanishes between the re-create and the move", async () => {
+    // The narrowest possible race: an *arr import deletes the category folder
+    // in the instant AFTER moveIntoCategoryDir re-created it and BEFORE the
+    // rename runs. Simulated by deleting the folder from inside the first
+    // rename call itself.
+    const mediaBytes = new Uint8Array([17, 18, 19, 20]);
+    const title = "Show.S01E04";
+    const category = "sonarr";
+    const categoryDir = path.join(testRoot, category);
+
+    configFindUnique.mockImplementation(({ where }: { where: { key: string } }) => {
+      if (where.key === "download.path") return Promise.resolve({ value: testRoot });
+      if (where.key === "download.convertToMkv") return Promise.resolve({ value: "false" });
+      return Promise.resolve(null);
+    });
+    downloadFindUnique.mockResolvedValue({
+      id: "download-4",
+      title,
+      category,
+      status: "queued",
+      url: "https://example.com/video.mp4",
+    });
+    downloadUpdate.mockResolvedValue({});
+    downloadCount.mockResolvedValue(0);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(mediaBytes, {
+          status: 200,
+          headers: { "content-length": String(mediaBytes.byteLength) },
+        })
+      )
+    );
+
+    const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+    vi.mocked(fsp.rename).mockImplementationOnce(async (source, target) => {
+      await rm(categoryDir, { recursive: true, force: true });
+      return actual.rename(source, target); // fails with ENOENT, the retry must recover
+    });
+
+    await processDownload("download-4");
+
+    await expect(readFile(path.join(categoryDir, `${title}.mp4`))).resolves.toEqual(
+      Buffer.from(mediaBytes)
+    );
+    expect(downloadUpdate).toHaveBeenCalledWith({
+      where: { id: "download-4" },
+      data: expect.objectContaining({ status: "completed" }),
     });
   });
 });
