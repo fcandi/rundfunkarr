@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
+import { fetchWithRetry } from "@/lib/fetch-retry";
 import type { Ruleset, TvdbData, ApiResultItem } from "@/types";
-import { stripBroadcastAnnotations } from "@/lib/titles";
 
 /**
  * "Titel (1/6)" -- ARTE numbers the episodes of a season this way and gives no
@@ -32,16 +32,15 @@ const ABSOLUTE_EPISODE_PATTERNS = [
   /Teil\s*(\d+)/i, // Teil 123
 ];
 
-interface MediathekSearchResult {
-  results: ApiResultItem[];
-}
-
 /**
  * Search MediathekView API directly
  */
 async function searchMediathekApi(query: string): Promise<ApiResultItem[]> {
   try {
-    const response = await fetch("https://mediathekviewweb.de/api/query", {
+    // fetchWithRetry, like every other external call in this codebase: a
+    // transient MediathekView hiccup must not turn into "no ruleset, 0
+    // releases" for the show being generated.
+    const response = await fetchWithRetry("https://mediathekviewweb.de/api/query", {
       method: "POST",
       headers: {
         "Content-Type": "text/plain",
@@ -109,17 +108,18 @@ function escapeRegex(str: string): string {
  *
  * Anchored at the start and closed off with a lookahead instead of `\b`, so
  * that "Tatort" does not also take "Tatortreiniger" while a name ending in a
- * non-word character still matches. Deliberately no `u` flag: `filterMatches`
- * compiles the pattern with `new RegExp(value)`.
+ * non-word character still matches. Deliberately no `u` flag, and stored as a
+ * RegexIgnoreCase filter: `filterMatches` must apply it with exactly the
+ * semantics `titleBelongsToShow` used when the ruleset was generated --
+ * case-insensitively, on the raw title. Any asymmetry between the two writes
+ * a ruleset that can never match and, because it exists, is never retried.
  */
 export function buildTitleScopeRegex(showName: string): string {
   return `^${escapeRegex(showName)}(?![A-Za-z0-9\u00c0-\u024f])`;
 }
 
 function titleBelongsToShow(title: string, showName: string): boolean {
-  return new RegExp(buildTitleScopeRegex(showName), "i").test(
-    stripBroadcastAnnotations(title)
-  );
+  return new RegExp(buildTitleScopeRegex(showName), "i").test(title);
 }
 
 /**
@@ -172,6 +172,13 @@ function findBestMatchingTopic(
     ...showInfo.aliases.map((a) => a.name),
   ].filter(Boolean) as string[];
 
+  // A single title starting with the show name is not evidence -- a talk-show
+  // episode that merely leads with the name would otherwise mint a ruleset
+  // keyed on its topic, and that wrong ruleset then blocks generation for the
+  // real show forever. Two entries of the same slot are the minimum credible
+  // signal for "this series runs inside that slot".
+  const MIN_TITLE_SCOPE_MATCHES = 2;
+
   let best: { topic: string; showName: string; count: number } | null = null;
   for (const name of originalNames) {
     const countsByTopic = new Map<string, number>();
@@ -180,6 +187,7 @@ function findBestMatchingTopic(
       countsByTopic.set(item.topic, (countsByTopic.get(item.topic) || 0) + 1);
     }
     for (const [topic, count] of countsByTopic) {
+      if (count < MIN_TITLE_SCOPE_MATCHES) continue;
       if (!best || count > best.count) best = { topic, showName: name, count };
     }
     if (best) break; // German name wins over English name and aliases
@@ -193,12 +201,12 @@ function findBestMatchingTopic(
     return { topic: best.topic, titleScope: best.showName };
   }
 
-  // If only one topic in results, use it
-  if (topics.length === 1) {
-    console.log(`[RulesetGenerator] Using single topic: "${topics[0]}"`);
-    return { topic: topics[0], titleScope: null };
-  }
-
+  // Deliberately NO single-topic fallback here. It was safe while the search
+  // covered only the `topic` field (a lone topic then necessarily matched the
+  // query), but the search now includes titles: a show that is absent from the
+  // index can return 50 foreign entries that happen to share one collective
+  // slot, and the fallback would key an UNSCOPED ruleset on that slot --
+  // claiming every series in it, permanently.
   console.log(`[RulesetGenerator] No matching topic found. Available: ${topics.join(", ")}`);
   return null;
 }
@@ -358,9 +366,12 @@ function generateRegexPatterns(
       }
     }
 
-    // Checked only after the explicit patterns, and over all samples: an entry
-    // that states its season must never be read as a bare "(episode/total)".
-    if (results.slice(0, 5).some((result) => COUNT_OF_PATTERN.test(result.title))) {
+    // Checked only after the explicit patterns, and over the same fifteen-sample
+    // window the strategy detection used -- a narrower window here could pick
+    // the strategy from entries the emission never sees, persisting a ruleset
+    // with no episode regex at all. An entry that states its season must never
+    // be read as a bare "(episode/total)".
+    if (results.slice(0, 15).some((result) => COUNT_OF_PATTERN.test(result.title))) {
       return {
         episodeRegex: "\\((\\d{1,3})/\\d{1,3}\\)",
         // No season in the title -- `matchesSeasonAndEpisode` fills it in for
@@ -532,7 +543,8 @@ function convertToRuleset(dbRuleset: {
  */
 export async function generateRulesetForShow(
   tvdbId: number,
-  showInfo: TvdbData
+  showInfo: TvdbData,
+  presearchedResults?: ApiResultItem[]
 ): Promise<Ruleset | null> {
   console.log(
     `[RulesetGenerator] Attempting to generate ruleset for "${showInfo.germanName || showInfo.name}" (TVDB: ${tvdbId})`
@@ -550,12 +562,22 @@ export async function generateRulesetForShow(
     return convertToRuleset(existingByTvdbId);
   }
 
-  // Search MediathekView for the show
+  // Search MediathekView for the show. The caller usually already holds the
+  // response for exactly this query (same name, same fields, future entries
+  // kept) -- reuse it instead of hitting the external API a second time in
+  // the same request.
   const searchQuery = showInfo.germanName || showInfo.name;
-  console.log(`[RulesetGenerator] Searching MediathekView for: "${searchQuery}"`);
-
-  const results = await searchMediathekApi(searchQuery);
-  console.log(`[RulesetGenerator] MediathekView returned ${results.length} results`);
+  let results: ApiResultItem[];
+  if (presearchedResults !== undefined) {
+    results = presearchedResults;
+    console.log(
+      `[RulesetGenerator] Reusing ${results.length} pre-searched results for "${searchQuery}"`
+    );
+  } else {
+    console.log(`[RulesetGenerator] Searching MediathekView for: "${searchQuery}"`);
+    results = await searchMediathekApi(searchQuery);
+    console.log(`[RulesetGenerator] MediathekView returned ${results.length} results`);
+  }
 
   if (results.length === 0) {
     // Try English name if German search failed
@@ -580,10 +602,12 @@ function buildFilters(titleScope: string | null): string {
 
   // A collective topic holds every series of that slot. Without this filter the
   // ruleset would claim all of them and hand Sonarr a foreign show's episodes.
+  // RegexIgnoreCase, not Regex: the filter must accept exactly what
+  // `titleBelongsToShow` accepted when this ruleset was generated.
   if (titleScope) {
     filters.push({
       attribute: "title",
-      type: "Regex",
+      type: "RegexIgnoreCase",
       value: buildTitleScopeRegex(titleScope),
     });
   }
@@ -615,6 +639,25 @@ async function generateRulesetFromResults(
     return convertToRuleset(existingByTopic);
   }
 
+  // An UNSCOPED ruleset claims its whole topic. Two of those on one topic
+  // would cross-attribute episodes between shows, so if any other show already
+  // holds a ruleset there, refuse -- this restores the safety the old
+  // unique-topic constraint provided for plain-topic matches (a partial match
+  // like "Der Tatortreiniger" against the existing topic "Tatort" lands here).
+  // Scoped rulesets coexist by design; their title filters keep them apart.
+  if (!titleScope) {
+    const foreign = await prisma.generatedRuleset.findFirst({
+      where: { topic: matchingTopic },
+    });
+    if (foreign) {
+      console.log(
+        `[RulesetGenerator] Topic "${matchingTopic}" already has a ruleset for ` +
+          `TVDB ${foreign.tvdbId}; refusing a second unscoped one for TVDB ${tvdbId}`
+      );
+      return null;
+    }
+  }
+
   // Detect matching strategy -- only on the entries this ruleset will accept,
   // otherwise the other shows of a collective slot decide the pattern.
   const topicResults = results.filter(
@@ -622,6 +665,18 @@ async function generateRulesetFromResults(
   );
   const strategy = detectMatchingStrategy(topicResults, matchingTopic);
   const patterns = generateRegexPatterns(topicResults, strategy, matchingTopic);
+
+  // A SeasonAndEpisodeNumber ruleset without an episode regex can never match
+  // anything, and once persisted it is never regenerated -- the show would go
+  // permanently dark. Refuse instead, so the next search tries again (the
+  // index sample that failed to yield a pattern changes over time).
+  if (strategy === "SeasonAndEpisodeNumber" && !patterns.episodeRegex) {
+    console.log(
+      `[RulesetGenerator] Strategy ${strategy} detected for "${matchingTopic}" but no ` +
+        `episode pattern could be derived; not persisting a ruleset that cannot match`
+    );
+    return null;
+  }
 
   // Create new ruleset
   console.log(

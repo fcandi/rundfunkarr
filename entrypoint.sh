@@ -86,12 +86,23 @@ else
 fi
 
 # One-shot migration for databases created while `topic` was unique on its own.
-# SQLite cannot drop a column constraint in place, so the table is rebuilt. The
-# grep on the stored DDL keeps this a no-op on every later start.
-if su-exec "$USER_NAME" sqlite3 "$DB_PATH" "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'GeneratedRuleset';" | grep -q "topic TEXT NOT NULL UNIQUE"; then
+# The old constraint exists in two DDL forms: the inline UNIQUE written by
+# init-db.sql (surfacing as a sqlite_autoindex) and the separate named index
+# ("GeneratedRuleset_topic_key") a Prisma-created database carries. Grepping
+# the table DDL would miss the second form entirely, so detect ANY unique
+# index over exactly the topic column instead. SQLite cannot drop a column
+# constraint in place, so the table is rebuilt; -bail aborts on the first
+# error, before COMMIT, which rolls the transaction back.
+TOPIC_UNIQUE=$(su-exec "$USER_NAME" sqlite3 "$DB_PATH" \
+    "SELECT il.name FROM pragma_index_list('GeneratedRuleset') il
+     WHERE il.\"unique\" = 1
+       AND (SELECT count(*) FROM pragma_index_info(il.name)) = 1
+       AND (SELECT name FROM pragma_index_info(il.name)) = 'topic';")
+if [ -n "$TOPIC_UNIQUE" ]; then
     echo "Migrating GeneratedRuleset: unique topic -> unique (topic, tvdbId)..."
-    if ! su-exec "$USER_NAME" sqlite3 "$DB_PATH" <<'SQL'
-BEGIN;
+    ROWS_BEFORE=$(su-exec "$USER_NAME" sqlite3 "$DB_PATH" "SELECT count(*) FROM GeneratedRuleset;")
+    if ! su-exec "$USER_NAME" sqlite3 -bail "$DB_PATH" <<'SQL'
+BEGIN IMMEDIATE;
 CREATE TABLE GeneratedRuleset_migrated (
     id TEXT PRIMARY KEY,
     topic TEXT NOT NULL,
@@ -118,9 +129,13 @@ ON GeneratedRuleset(topic, tvdbId);
 COMMIT;
 SQL
     then
-        fail "Migration of GeneratedRuleset failed. The database was left untouched."
+        fail "Migration of GeneratedRuleset failed; the transaction was rolled back."
     fi
-    echo "GeneratedRuleset migrated"
+    ROWS_AFTER=$(su-exec "$USER_NAME" sqlite3 "$DB_PATH" "SELECT count(*) FROM GeneratedRuleset;")
+    if [ "$ROWS_BEFORE" != "$ROWS_AFTER" ]; then
+        fail "GeneratedRuleset migration lost rows ($ROWS_BEFORE -> $ROWS_AFTER); restore the database from backup."
+    fi
+    echo "GeneratedRuleset migrated ($ROWS_AFTER rows)"
 fi
 
 MISSING_TABLES=""

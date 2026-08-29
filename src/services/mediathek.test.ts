@@ -451,7 +451,9 @@ describe("episodes numbered without a season", () => {
       priority: 0,
       filters: JSON.stringify([
         { attribute: "duration", type: "GreaterThan", value: "15" },
-        { attribute: "title", type: "Regex", value: "^Familiengeheimnisse(?![A-Za-z0-9])" },
+        // RegexIgnoreCase mirrors what the generator writes: the filter must
+        // accept exactly what the generation-time matching accepted.
+        { attribute: "title", type: "RegexIgnoreCase", value: "^Familiengeheimnisse(?![A-Za-z0-9])" },
       ]),
       titleRegexRules: "[]",
       episodeRegex: "\\((\\d{1,3})/\\d{1,3}\\)",
@@ -508,6 +510,26 @@ describe("episodes numbered without a season", () => {
     mockedGetShowInfo.mockResolvedValue(show);
     mockedGetRulesets.mockReturnValue([countOfRuleset()]);
     mockApi([makeItem({ topic: ARTE_SLOT, title: "Familiengeheimnisse (3/6)" })]);
+
+    const xml = await fetchSearchResultsById(show, null, null, 100, 0);
+
+    expect(xml).toContain('total="0"');
+  });
+
+  it("keeps rejecting items whose season regex fails, even for single-season shows", async () => {
+    // The sole-season fallback belongs to rulesets that declare NO season
+    // regex. A ruleset that HAS one uses its failure as the signal "this entry
+    // is not a regular episode" -- a making-of whose title happens to satisfy
+    // the episode regex must not be filed under the sole season.
+    const show = makeShow(singleSeason);
+    mockedGetShowInfo.mockResolvedValue(show);
+    mockedGetRulesets.mockReturnValue([
+      countOfRuleset({
+        episodeRegex: "Folge\\s*(\\d+)",
+        seasonRegex: "Staffel\\s*(\\d+)",
+      }),
+    ]);
+    mockApi([makeItem({ topic: ARTE_SLOT, title: "Familiengeheimnisse - Making-of Folge 5" })]);
 
     const xml = await fetchSearchResultsById(show, null, null, 100, 0);
 

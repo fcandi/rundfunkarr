@@ -98,6 +98,8 @@ describe("shows that live in a collective topic", () => {
     const filters = JSON.parse(data.filters);
     const titleFilter = filters.find((f: { attribute: string }) => f.attribute === "title");
     expect(titleFilter).toBeDefined();
+    // Case-insensitive at match time, exactly like the generation-time check.
+    expect(titleFilter.type).toBe("RegexIgnoreCase");
 
     const scope = new RegExp(titleFilter.value, "i");
     expect(scope.test("Familiengeheimnisse (1/6)")).toBe(true);
@@ -133,6 +135,106 @@ describe("shows that live in a collective topic", () => {
     if (call) {
       expect(call[0].data.episodeRegex).not.toBe("\\((\\d{1,3})/\\d{1,3}\\)");
     }
+  });
+});
+
+describe("weak evidence must not mint a ruleset", () => {
+  it("refuses on a single stray title match", async () => {
+    // One talk-show episode that merely leads with the show name is not
+    // evidence that the series runs in that slot -- a ruleset minted from it
+    // would block generation for the real show forever.
+    mockApi([
+      makeItem({ topic: "37 Grad", title: "Familiengeheimnisse - wenn Schweigen krank macht" }),
+      makeItem({ topic: "Dokumentationen", title: "Etwas ganz anderes" }),
+    ]);
+
+    const result = await generateRulesetForShow(446785, makeShow());
+
+    expect(result).toBeNull();
+    expect(prismaMock.generatedRuleset.create).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a lone topic that never matched the show", async () => {
+    // Title search can return 50 foreign entries sharing one collective slot
+    // although the show itself is absent from the index; keying an unscoped
+    // ruleset on that slot would claim every series in it.
+    mockApi([
+      makeItem({ topic: "Fernsehfilme und Serien - Serien", title: "Die großen Familiengeheimnisse (1/2)" }),
+      makeItem({ topic: "Fernsehfilme und Serien - Serien", title: "Die großen Familiengeheimnisse (2/2)" }),
+    ]);
+
+    const result = await generateRulesetForShow(446785, makeShow());
+
+    expect(result).toBeNull();
+    expect(prismaMock.generatedRuleset.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a second unscoped ruleset on an occupied topic", async () => {
+    // Partial topic matching ("Der Tatortreiniger" vs the existing topic
+    // "Tatort") resolves unscoped; if another show already holds a ruleset on
+    // that topic, creating a second unscoped one would cross-attribute
+    // episodes between the two shows.
+    prismaMock.generatedRuleset.findFirst.mockImplementation(async ({ where }) =>
+      where.tvdbId === undefined
+        ? { id: "x", topic: "Tatort", tvdbId: 83214, showName: "Tatort" }
+        : null
+    );
+    mockApi([makeItem({ topic: "Tatort", title: "Tatort: Irgendein Fall (S01/E01)" })]);
+
+    const result = await generateRulesetForShow(
+      999999,
+      makeShow({ id: 999999, name: "Der Tatortreiniger", germanName: "Der Tatortreiniger" })
+    );
+
+    expect(result).toBeNull();
+    expect(prismaMock.generatedRuleset.create).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a SeasonAndEpisodeNumber ruleset without an episode pattern", async () => {
+    // Strategy detection and pattern emission can disagree; a persisted
+    // ruleset with no episode regex would never match and never be retried.
+    // "Staffel N Episode M" counts for the strategy but has no emission branch.
+    mockApi([1, 2, 3].map((n) =>
+      makeItem({ topic: "Familiengeheimnisse", title: `Familiengeheimnisse Staffel 1 Episode ${n}` })
+    ));
+
+    const result = await generateRulesetForShow(446785, makeShow());
+
+    expect(result).toBeNull();
+    expect(prismaMock.generatedRuleset.create).not.toHaveBeenCalled();
+  });
+
+  it("derives the count-of pattern from the same window the strategy saw", async () => {
+    // The strategy is detected over fifteen samples; the emission must scan
+    // the same window, or recent extras in the first five entries persist a
+    // ruleset with an empty episode regex.
+    mockApi([
+      ...[1, 2, 3, 4, 5].map((n) =>
+        makeItem({ title: `Familiengeheimnisse Spezial ${n}`, duration: 400 })
+      ),
+      ...[1, 2, 3, 4, 5, 6].map((n) => makeItem({ title: `Familiengeheimnisse (${n}/6)` })),
+    ]);
+
+    await generateRulesetForShow(446785, makeShow());
+
+    const { data } = prismaMock.generatedRuleset.create.mock.calls[0][0];
+    expect(data.episodeRegex).toBe("\\((\\d{1,3})/\\d{1,3}\\)");
+  });
+});
+
+describe("the caller's search results are reused", () => {
+  it("does not hit the external API when results are passed in", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateRulesetForShow(
+      446785,
+      makeShow(),
+      [1, 2, 3, 4, 5, 6].map((n) => makeItem({ title: `Familiengeheimnisse (${n}/6)` }))
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prismaMock.generatedRuleset.create).toHaveBeenCalled();
   });
 });
 

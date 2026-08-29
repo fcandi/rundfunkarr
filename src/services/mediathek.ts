@@ -152,6 +152,12 @@ function filterMatches(item: ApiResultItem, filter: Filter): boolean {
       } catch {
         return false;
       }
+    case "RegexIgnoreCase" as MatchType:
+      try {
+        return new RegExp(filterValue, "i").test(attributeValue);
+      } catch {
+        return false;
+      }
     case "GreaterThan" as MatchType: {
       const attrNum = parseFloat(attributeValue);
       const filterNum = parseFloat(filterValue);
@@ -382,10 +388,18 @@ async function matchesSeasonAndEpisode(
   if (!episode) return null;
 
   // Some broadcasters number episodes without ever naming the season ("Titel
-  // (1/6)"). That is unambiguous exactly as long as the show has a single
-  // season -- with more than one, guessing would silently file the episode
-  // under the wrong one, so refuse instead.
-  const seasonNum = season ? parseInt(season) : soleSeasonNumber(tvdbData);
+  // (1/6)"); the generator encodes that as a ruleset with no season regex at
+  // all. Only such rulesets may fall back to the show's sole season -- a
+  // ruleset that HAS a season regex which merely failed on this title used to
+  // reject the item, and must keep doing so (the failed extraction is the
+  // signal that this entry is not a regular episode). And even the fallback
+  // refuses when the show has more than one season: nothing in the title says
+  // which, and guessing would silently file the episode under the wrong one.
+  const seasonNum = season
+    ? parseInt(season)
+    : ruleset.seasonRegex
+      ? null
+      : soleSeasonNumber(tvdbData);
   if (seasonNum === null) return null;
 
   const episodeNum = parseInt(episode);
@@ -581,8 +595,9 @@ async function applyRulesetFilters(
         `[Mediathek] No rulesets found for tvdbId ${tvdbData.id} (${tvdbData.name}), attempting auto-generation...`
       );
 
-      // Try to auto-generate a ruleset
-      const generatedRuleset = await getOrGenerateRulesetForShow(tvdbData.id, tvdbData);
+      // Try to auto-generate a ruleset, reusing the response already in hand
+      // (the generator would otherwise repeat the very same external query)
+      const generatedRuleset = await getOrGenerateRulesetForShow(tvdbData.id, tvdbData, results);
       if (generatedRuleset) {
         console.log(
           `[Mediathek] Auto-generated ruleset for topic "${generatedRuleset.topic}" -> TVDB ${tvdbData.id}`

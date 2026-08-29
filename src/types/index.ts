@@ -114,6 +114,10 @@ export enum MatchType {
   ExactMatch = "ExactMatch",
   Contains = "Contains",
   Regex = "Regex",
+  // Case-insensitive variant, written by the ruleset generator for its title
+  // scope filters. The generator decides case-insensitively, so the stored
+  // filter must be applied the same way -- a plain Regex filter is not.
+  RegexIgnoreCase = "RegexIgnoreCase",
   GreaterThan = "GreaterThan",
   LessThan = "LessThan",
 }

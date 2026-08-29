@@ -1,6 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
-import type { Ruleset, TvdbData } from "@/types";
+import type { ApiResultItem, Ruleset, TvdbData } from "@/types";
 import {
   getGeneratedRulesets,
   generateRulesetForShow,
@@ -174,13 +174,21 @@ export function addGeneratedRuleset(ruleset: Ruleset): void {
   console.log(`[Rulesets] Added generated ruleset for topic "${ruleset.topic}"`);
 }
 
+// Failed generation attempts are remembered briefly. A Sonarr season search is
+// a burst of one request per episode; without this, a show that cannot get a
+// ruleset right now re-runs the whole generation -- including its external
+// searches -- once per episode, every search round, indefinitely.
+const failedGenerationAt = new Map<number, number>();
+const FAILED_GENERATION_TTL_MS = 30 * 60 * 1000;
+
 /**
  * Get or generate a ruleset for a show
  * This is the main entry point for auto-generating rulesets
  */
 export async function getOrGenerateRulesetForShow(
   tvdbId: number,
-  showInfo: TvdbData
+  showInfo: TvdbData,
+  presearchedResults?: ApiResultItem[]
 ): Promise<Ruleset | null> {
   // First check if we already have a ruleset (external or generated)
   if (hasRulesetForTvdbId(tvdbId)) {
@@ -196,16 +204,24 @@ export async function getOrGenerateRulesetForShow(
     return existingGenerated;
   }
 
+  const failedAt = failedGenerationAt.get(tvdbId);
+  if (failedAt && Date.now() - failedAt < FAILED_GENERATION_TTL_MS) {
+    console.log(`[Rulesets] Skipping generation for TVDB ${tvdbId} (recently failed)`);
+    return null;
+  }
+
   // Try to auto-generate a new ruleset
   console.log(`[Rulesets] No ruleset found for TVDB ${tvdbId}, attempting auto-generation...`);
-  const generated = await generateRulesetForShow(tvdbId, showInfo);
+  const generated = await generateRulesetForShow(tvdbId, showInfo, presearchedResults);
 
   if (generated) {
     // Add to in-memory cache
+    failedGenerationAt.delete(tvdbId);
     addGeneratedRuleset(generated);
     return generated;
   }
 
+  failedGenerationAt.set(tvdbId, Date.now());
   return null;
 }
 
