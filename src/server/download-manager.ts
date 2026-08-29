@@ -6,6 +6,18 @@ import * as path from "path";
 
 const MAX_CONCURRENT_DOWNLOADS = 1;
 
+/**
+ * Height below which a broadcaster's film-list MP4 is worth replacing with its
+ * HLS stream. ARTE tops out at 720p in the film list, so anything taller than
+ * that is a genuine gain; equal or smaller means the MP4 already matches.
+ */
+const HLS_UPGRADE_MIN_HEIGHT = 721;
+
+/** Opt-out for the HLS upgrade path, in case a broadcaster's stream misbehaves. */
+function isHlsUpgradeEnabled(): boolean {
+  return process.env.HLS_QUALITY_UPGRADE !== "false";
+}
+
 async function getDownloadBasePath(): Promise<string> {
   const { getSetting } = await import("@/lib/settings");
   return (
@@ -117,6 +129,56 @@ async function processDownload(downloadId: string): Promise<void> {
     const categoryDir = path.join(downloadBasePath, download.category);
     await fs.mkdir(downloadTempPath, { recursive: true });
     await fs.mkdir(categoryDir, { recursive: true });
+
+    // Some broadcasters publish a downgraded MP4 to the film list while their
+    // player serves a better HLS ladder for the same programme (ARTE caps the
+    // film list at 720p but streams 1080p). Prefer the stream when it is
+    // genuinely taller; fall back to the MP4 on any failure.
+    if (isHlsUpgradeEnabled() && (await isMkvConversionEnabled())) {
+      const { resolveArteHlsStream } = await import("@/services/arte-hls");
+      const hls = await resolveArteHlsStream(download.url);
+
+      if (hls && hls.height >= HLS_UPGRADE_MIN_HEIGHT) {
+        console.log(
+          `[Download] Upgrading to HLS ${hls.width}x${hls.height} instead of the film-list MP4`
+        );
+
+        const tempMkvPath = path.join(downloadTempPath, `${download.title}.mkv`);
+        const finalMkvPath = path.join(categoryDir, `${download.title}.mkv`);
+
+        const { downloadHlsToMkv } = await import("./ffmpeg");
+        const hlsResult = await downloadHlsToMkv(
+          hls.manifestUrl,
+          hls.programIndex,
+          tempMkvPath,
+          async (progress) => {
+            await prisma.download.update({
+              where: { id: downloadId },
+              data: { progress },
+            });
+          }
+        );
+
+        if (hlsResult.success) {
+          // The *arr app may have removed the category folder while this
+          // download ran, same as in the conversion path below.
+          await fs.mkdir(categoryDir, { recursive: true });
+          await fs.rename(tempMkvPath, finalMkvPath);
+          await completeDownload(
+            downloadId,
+            download.title,
+            download.category,
+            finalMkvPath,
+            startTime
+          );
+          return;
+        }
+
+        // Not fatal: the MP4 below is still a valid, if smaller, copy.
+        await fs.unlink(tempMkvPath).catch(() => {});
+        console.warn(`[Download] HLS upgrade failed (${hlsResult.error}), falling back to the MP4`);
+      }
+    }
 
     // Determine file extension from URL
     const urlPath = new URL(download.url).pathname;
@@ -255,6 +317,38 @@ async function processDownload(downloadId: string): Promise<void> {
       startDownloadProcessing().catch(console.error);
     }
   }
+}
+
+/** Record a finished file: size, storage path (honouring the folder mapping), timestamps. */
+async function completeDownload(
+  downloadId: string,
+  title: string,
+  category: string,
+  finalPath: string,
+  startTime: number
+): Promise<void> {
+  const stats = await fs.stat(finalPath);
+
+  const downloadFolderMapping = process.env.DOWNLOAD_FOLDER_PATH_MAPPING;
+  const storagePath = downloadFolderMapping
+    ? path.join(downloadFolderMapping, category, path.basename(finalPath))
+    : finalPath;
+
+  await prisma.download.update({
+    where: { id: downloadId },
+    data: {
+      status: "completed",
+      progress: 100,
+      size: stats.size,
+      filePath: storagePath,
+      completedAt: new Date(),
+    },
+  });
+
+  const downloadTime = Math.floor((Date.now() - startTime) / 1000);
+  console.log(
+    `[Download] Completed: ${title} (${Math.round(stats.size / 1024 / 1024)}MB in ${downloadTime}s)`
+  );
 }
 
 async function markAsFailed(downloadId: string, error: string): Promise<void> {

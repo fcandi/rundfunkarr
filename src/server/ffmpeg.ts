@@ -175,6 +175,97 @@ export interface ConversionResult {
   error?: string;
 }
 
+/**
+ * Mux one program of an HLS master playlist straight into an MKV.
+ *
+ * Used for broadcasters whose film-list MP4 is worse than what their player
+ * serves (ARTE caps the film list at 720p while its HLS ladder reaches 1080p).
+ * Nothing is re-encoded, so this costs bandwidth and container muxing only.
+ *
+ * `programIndex` selects the video variant; ffmpeg pulls the audio and subtitle
+ * renditions attached to that program along with it.
+ */
+export async function downloadHlsToMkv(
+  manifestUrl: string,
+  programIndex: number,
+  mkvPath: string,
+  onProgress?: (percent: number) => void
+): Promise<ConversionResult> {
+  const ffmpegExists = await ensureFfmpegExists();
+  if (!ffmpegExists) {
+    return { success: false, error: "FFmpeg not available" };
+  }
+
+  return new Promise((resolve) => {
+    const args = [
+      "-hide_banner",
+      // A dropped segment mid-download would otherwise abort the whole grab.
+      "-reconnect",
+      "1",
+      "-reconnect_streamed",
+      "1",
+      "-reconnect_delay_max",
+      "30",
+      "-i",
+      manifestUrl,
+      "-map",
+      `p:${programIndex}`,
+      "-c",
+      "copy",
+      // HLS carries timestamps that MKV rejects unless they start at zero.
+      "-start_at_zero",
+      "-avoid_negative_ts",
+      "make_zero",
+      "-y",
+      mkvPath,
+    ];
+
+    console.log(`[FFmpeg] Starting HLS download (program ${programIndex}) -> ${mkvPath}`);
+    const proc = spawn(FFMPEG_PATH, args);
+
+    let stderr = "";
+    let totalSeconds = 0;
+
+    proc.stderr.on("data", (data) => {
+      const chunk = data.toString();
+      stderr += chunk;
+
+      if (!totalSeconds) {
+        const durationMatch = stderr.match(/Duration: (\d+):(\d+):(\d+)/);
+        if (durationMatch) {
+          totalSeconds =
+            parseInt(durationMatch[1]) * 3600 +
+            parseInt(durationMatch[2]) * 60 +
+            parseInt(durationMatch[3]);
+        }
+      }
+
+      const timeMatch = chunk.match(/time=(\d+):(\d+):(\d+)/);
+      if (totalSeconds > 0 && timeMatch && onProgress) {
+        const currentSeconds =
+          parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
+        onProgress(Math.min(100, Math.round((currentSeconds / totalSeconds) * 100)));
+      }
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        console.log(`[FFmpeg] HLS download completed: ${mkvPath}`);
+        resolve({ success: true, outputPath: mkvPath });
+      } else {
+        console.error(`[FFmpeg] HLS download failed with code ${code}`);
+        console.error(`[FFmpeg] Error output: ${stderr.slice(-2000)}`);
+        resolve({ success: false, error: `FFmpeg exited with code ${code}` });
+      }
+    });
+
+    proc.on("error", (err) => {
+      console.error(`[FFmpeg] Process error: ${err}`);
+      resolve({ success: false, error: err.message });
+    });
+  });
+}
+
 export async function convertMp4ToMkv(
   mp4Path: string,
   mkvPath: string,
